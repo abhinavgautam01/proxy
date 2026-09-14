@@ -494,6 +494,28 @@ upstream:
   debian: "http://archive.ubuntu.com/ubuntu"
 ```
 
+A Debian release is served by more than one archive: security updates live on
+a separate host from the main archive, so one upstream URL cannot cover a
+complete suite set. Additional archives are configured under
+`upstream.debian_repositories` and served at `/debian/{name}/`:
+
+```yaml
+upstream:
+  debian: "http://deb.debian.org/debian"
+  debian_repositories:
+    security: "https://security.debian.org/debian-security"
+```
+
+```
+deb http://localhost:8080/debian trixie main
+deb http://localhost:8080/debian/security trixie-security main
+```
+
+`upstream.debian` keeps serving `/debian/pool/…` and `/debian/dists/…`
+unchanged, so adding repositories does not affect existing sources.list
+entries. A repository name shadows the main archive's root path of the same
+name; `pool` and `dists` are refused for that reason.
+
 ### RPM / Yum / DNF
 
 Configure yum/dnf to use the proxy in `/etc/yum.repos.d/proxy.repo`:
@@ -880,7 +902,8 @@ Recently cached:
 | `GET /v2/homebrew/core/*` | Homebrew core bottle manifests and blobs from GHCR |
 | `GET /apk/{repository}/*` | Alpine APK repository protocol |
 | `GET /generic/{name}/*` | Generic HTTP download proxy (GitHub release assets, mise/aqua) |
-| `GET /debian/*` | Debian/APT repository protocol |
+| `GET /debian/*` | Debian/APT repository protocol (main archive) |
+| `GET /debian/{repository}/*` | Debian/APT repository protocol (named archive, e.g. security) |
 | `GET /rpm/*` | RPM/Yum repository protocol |
 
 ### Mirror API
