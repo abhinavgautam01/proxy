@@ -6,11 +6,17 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"gocloud.dev/blob"
 )
 
 func TestOpenBucket(t *testing.T) {
@@ -292,4 +298,318 @@ func fileURLFromPath(path string) string {
 		return "file:///" + path
 	}
 	return "file://" + path
+}
+
+func TestOpenBucketWritesNoAttrsSidecar(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	b, err := OpenBucket(ctx, fileURLFromPath(dir))
+	if err != nil {
+		t.Fatalf("OpenBucket failed: %v", err)
+	}
+	defer func() { _ = b.Close() }()
+
+	if _, _, err := b.Store(ctx, "pkg/thing-1.0.0.tgz", strings.NewReader("content")); err != nil {
+		t.Fatalf("Store failed: %v", err)
+	}
+
+	sidecars, err := filepath.Glob(filepath.Join(dir, "*", "*.attrs"))
+	if err != nil {
+		t.Fatalf("Glob failed: %v", err)
+	}
+	if len(sidecars) != 0 {
+		t.Errorf("got sidecar files %v, want none: a truncated sidecar fails reads that overlap a write", sidecars)
+	}
+}
+
+// A read overlapping a write to the same key must not fail. fileblob rewrote
+// its ".attrs" sidecar in place, so a reader decoding it mid-write saw a
+// partial file, which the proxy served as a 502 on an artifact it held.
+func TestConcurrentReadsSurviveWritesToSameKey(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Go opens files without FILE_SHARE_DELETE, so a writer cannot replace
+		// a file a reader holds open: its rename fails with access denied
+		// instead of contending. The other platforms exercise this race.
+		t.Skip("Windows refuses to replace a file readers hold open")
+	}
+	const (
+		key          = "pkg/thing-1.0.0.tgz"
+		readers      = 4
+		readsPerRead = 500
+	)
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	b, err := OpenBucket(ctx, fileURLFromPath(dir))
+	if err != nil {
+		t.Fatalf("OpenBucket failed: %v", err)
+	}
+	defer func() { _ = b.Close() }()
+
+	payload := strings.Repeat("x", 4096)
+	if _, _, err := b.Store(ctx, key, strings.NewReader(payload)); err != nil {
+		t.Fatalf("seeding Store failed: %v", err)
+	}
+
+	// The writer reports how it ended: a Store failure would otherwise stop
+	// the writes silently and let zero read failures pass for a test that
+	// never contended anything.
+	done := make(chan struct{})
+	var writers sync.WaitGroup
+	var writes int
+	var writeErr error
+	writers.Add(1)
+	go func() {
+		defer writers.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if _, _, err := b.Store(ctx, key, strings.NewReader(payload)); err != nil {
+				writeErr = err
+				return
+			}
+			writes++
+		}
+	}()
+
+	var failures atomic.Int64
+	var reading sync.WaitGroup
+	for range readers {
+		reading.Add(1)
+		go func() {
+			defer reading.Done()
+			for range readsPerRead {
+				r, err := b.Open(ctx, key)
+				if err != nil {
+					failures.Add(1)
+					continue
+				}
+				if _, err := io.Copy(io.Discard, r); err != nil {
+					failures.Add(1)
+				}
+				_ = r.Close()
+			}
+		}()
+	}
+	reading.Wait()
+	close(done)
+	writers.Wait()
+
+	if writeErr != nil {
+		t.Fatalf("writer stopped early: %v", writeErr)
+	}
+	if writes == 0 {
+		t.Fatal("no write completed, so the reads were never contended")
+	}
+	if got := failures.Load(); got != 0 {
+		t.Errorf("%d of %d reads failed while one writer rewrote the same key, want 0", got, readers*readsPerRead)
+	}
+}
+
+// seedLegacySidecar stores key through a bucket that still writes sidecars, as
+// an earlier version did, and returns the path fileblob actually used. It is
+// discovered rather than assumed, so callers test the real mapping.
+func seedLegacySidecar(t *testing.T, dir, key, payload string) string {
+	t.Helper()
+	ctx := context.Background()
+
+	legacy, err := blob.OpenBucket(ctx, fileURLFromPath(dir)+"?no_tmp_dir=true")
+	if err != nil {
+		t.Fatalf("opening legacy bucket: %v", err)
+	}
+	if err := legacy.WriteAll(ctx, key, []byte(payload), nil); err != nil {
+		t.Fatalf("legacy WriteAll: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("closing legacy bucket: %v", err)
+	}
+
+	var found []string
+	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(path, ".attrs") {
+			found = append(found, path)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("walking %s: %v", dir, walkErr)
+	}
+	if len(found) != 1 {
+		t.Fatalf("got sidecars %v, want exactly one", found)
+	}
+	return found[0]
+}
+
+// An interrupted setAttrs leaves a partial sidecar that fails every read of the
+// key, and nothing rewrites one now, so a store has to clear it.
+//
+// One key per storage path the proxy builds: ArtifactPath across ecosystems,
+// metadata blobs, and the Gradle build cache. Scoped npm names, Go's "!" case
+// escaping and the ":" in OCI digests and Debian epochs are the characters
+// most likely to part fileblob's mapping from a plain path join.
+func TestStoreClearsLegacyAttrsSidecar(t *testing.T) {
+	keys := []string{
+		"npm/@babel/core/7.24.0/core-7.24.0.tgz",
+		"maven/org.apache.commons/commons-lang3/3.14.0/commons-lang3-3.14.0.jar",
+		"golang/github.com/!burnt!sushi/toml/v1.3.2/v1.3.2.zip",
+		"oci/library/nginx/sha256:abc123def456/manifest",
+		"debian/tzdata/1:2024a-1/tzdata_2024a-1_all.deb",
+		"pypi/requests/2.31.0/requests-2.31.0-py3-none-any.whl",
+		"cargo/serde/1.0.197/serde-1.0.197.crate",
+		"julia/Example/a1b2c3/a1b2c3.tar.gz",
+		"conda/numpy/1.26.4/numpy-1.26.4-py311.conda",
+		"_metadata/npm/@babel/core/metadata",
+		"_gradle/http-build-cache/0a1b2c3d4e5f",
+		// Keys fileblob escapes on every platform.
+		"npm/pkg//1.0.0/x.tgz",
+		"npm/pkg/../1.0.0/x.tgz",
+	}
+
+	for _, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			assertStoreClearsSidecar(t, key)
+		})
+	}
+}
+
+func assertStoreClearsSidecar(t *testing.T, key string) {
+	t.Helper()
+	const payload = "payload"
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	sidecar := seedLegacySidecar(t, dir, key, payload)
+	if err := os.WriteFile(sidecar, []byte(`{"user.content_type":"appl`), 0o600); err != nil {
+		t.Fatalf("corrupting sidecar: %v", err)
+	}
+
+	b := openFileBlob(t, dir)
+	if _, err := b.Open(ctx, key); err == nil {
+		t.Fatal("corrupt sidecar did not fail the read, so it is not the file fileblob reads for this key")
+	}
+
+	derived := b.legacySidecarPath(key)
+	if _, _, err := b.Store(ctx, key, strings.NewReader(payload)); err != nil {
+		t.Fatalf("Store failed: %v", err)
+	}
+
+	if derived == "" {
+		t.Fatalf("legacySidecarPath declined %q, but fileblob wrote %q", key, sidecar)
+	}
+	if derived != sidecar {
+		t.Fatalf("derived %q, but fileblob wrote %q", derived, sidecar)
+	}
+	if _, err := os.Stat(sidecar); !os.IsNotExist(err) {
+		t.Errorf("sidecar still present after Store, stat err = %v", err)
+	}
+	assertReadsBack(t, b, key, payload)
+}
+
+func assertReadsBack(t *testing.T, b *Blob, key, want string) {
+	t.Helper()
+	r, err := b.Open(context.Background(), key)
+	if err != nil {
+		t.Fatalf("read still failing after Store cleared the sidecar: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll failed: %v", err)
+	}
+	if string(got) != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func openFileBlob(t *testing.T, dir string) *Blob {
+	t.Helper()
+	s, err := OpenBucket(context.Background(), fileURLFromPath(dir))
+	if err != nil {
+		t.Fatalf("OpenBucket failed: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	b, ok := s.(*Blob)
+	if !ok {
+		t.Fatalf("got %T, want *Blob", s)
+	}
+	return b
+}
+
+// fileblob escapes a non-local key in a way this cannot reproduce, and one
+// holding ".." resolves outside the cache directory. Removal declines both
+// rather than delete the wrong file.
+func TestLegacySidecarPathEscapesLikeFileblob(t *testing.T) {
+	root := filepath.FromSlash("/var/cache/proxy")
+	b := &Blob{fileRoot: root}
+	windows := runtime.GOOS == osWindows
+
+	for _, tc := range []struct{ key, unix, windows string }{
+		{"npm/pkg/1.0.0/x.tgz", "npm/pkg/1.0.0/x.tgz", "npm/pkg/1.0.0/x.tgz"},
+		{"npm/pkg//1.0.0/x.tgz", "npm/pkg/__0x2f__1.0.0/x.tgz", "npm/pkg/__0x2f__1.0.0/x.tgz"},
+		{"npm/pkg/../../etc/passwd", "npm/pkg/..__0x2f__..__0x2f__etc/passwd", "npm/pkg/..__0x2f__..__0x2f__etc/passwd"},
+		{"npm/pkg/1.0.0/", "npm/pkg/1.0.0__0x2f__", "npm/pkg/1.0.0__0x2f__"},
+		{"npm/a\x01b", "npm/a__0x1__b", "npm/a__0x1__b"},
+		{"oci/nginx/sha256:abc/manifest", "oci/nginx/sha256:abc/manifest", "oci/nginx/sha256__0x3a__abc/manifest"},
+		{"debian/tzdata/1:2024a-1/x.deb", "debian/tzdata/1:2024a-1/x.deb", "debian/tzdata/1__0x3a__2024a-1/x.deb"},
+		{`npm/a\b`, `npm/a\b`, "npm/a__0x5c__b"},
+	} {
+		want := tc.unix
+		if windows {
+			want = tc.windows
+		}
+		want = filepath.Join(root, filepath.FromSlash(want)) + attrsExt
+		if got := b.legacySidecarPath(tc.key); got != want {
+			t.Errorf("legacySidecarPath(%q) = %q, want %q", tc.key, got, want)
+		}
+	}
+}
+
+func TestLegacySidecarPathDeclinesNonLocalKeys(t *testing.T) {
+	b := &Blob{fileRoot: filepath.FromSlash("/var/cache/proxy")}
+
+	for _, key := range []string{"", ".", "..", "/etc/passwd"} {
+		if got := b.legacySidecarPath(key); got != "" {
+			t.Errorf("legacySidecarPath(%q) = %q, want \"\"", key, got)
+		}
+	}
+}
+
+// Cloud backends have no local directory, so nothing is removed for them.
+func TestLegacySidecarPathEmptyForCloudBackends(t *testing.T) {
+	b := &Blob{}
+	if got := b.legacySidecarPath("npm/pkg/1.0.0/x.tgz"); got != "" {
+		t.Errorf("legacySidecarPath = %q, want \"\" when there is no file root", got)
+	}
+}
+
+// Cleanup that cannot complete must not fail the write. A non-empty directory
+// at the sidecar path makes os.Remove fail with something other than not-exist
+// on every platform, which is what a Windows sharing violation would look like
+// here.
+func TestStoreSucceedsWhenSidecarCannotBeRemoved(t *testing.T) {
+	const key = "npm/pkg/1.0.0/pkg-1.0.0.tgz"
+	const payload = "payload"
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	b := openFileBlob(t, dir)
+
+	sidecar := filepath.Join(dir, filepath.FromSlash(key)) + ".attrs"
+	if err := os.MkdirAll(filepath.Join(sidecar, "blocker"), 0o750); err != nil {
+		t.Fatalf("seeding an unremovable sidecar: %v", err)
+	}
+	if err := os.Remove(sidecar); err == nil {
+		t.Fatal("sidecar path was removable, so the test proves nothing")
+	}
+
+	if _, _, err := b.Store(ctx, key, strings.NewReader(payload)); err != nil {
+		t.Errorf("Store failed because cleanup could not complete: %v", err)
+	}
 }
