@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 
 // mockStorage implements storage.Storage for testing.
 type mockStorage struct {
+	mu        sync.Mutex
 	files     map[string][]byte
 	storeErr  error
 	openErr   error
@@ -41,6 +43,8 @@ func newMockStorage() *mockStorage {
 }
 
 func (s *mockStorage) Store(_ context.Context, path string, r io.Reader) (int64, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.storeErr != nil {
 		return 0, "", s.storeErr
 	}
@@ -53,6 +57,8 @@ func (s *mockStorage) Store(_ context.Context, path string, r io.Reader) (int64,
 }
 
 func (s *mockStorage) Open(_ context.Context, path string) (io.ReadCloser, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.openErr != nil {
 		return nil, s.openErr
 	}
@@ -64,6 +70,8 @@ func (s *mockStorage) Open(_ context.Context, path string) (io.ReadCloser, error
 }
 
 func (s *mockStorage) Exists(_ context.Context, path string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	_, ok := s.files[path]
 	return ok, nil
 }
@@ -75,11 +83,15 @@ func (s *mockStorage) Delete(ctx context.Context, path string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	delete(s.files, path)
 	return nil
 }
 
 func (s *mockStorage) Size(_ context.Context, path string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	data, ok := s.files[path]
 	if !ok {
 		return 0, storage.ErrNotFound
@@ -88,6 +100,8 @@ func (s *mockStorage) Size(_ context.Context, path string) (int64, error) {
 }
 
 func (s *mockStorage) UsedSpace(_ context.Context) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var total int64
 	for _, data := range s.files {
 		total += int64(len(data))
@@ -109,11 +123,15 @@ func (s *mockStorage) URL() string { return "mem://" }
 
 func (s *mockStorage) Close() error { return nil }
 
-// mockFetcher implements fetch.FetcherInterface for testing.
+// mockFetcher implements fetch.FetcherInterface for testing. Recording is
+// locked because coalescing tests call the handler from many goroutines; tests
+// read the recorded fields only after those calls have returned.
 type mockFetcher struct {
 	artifact      *fetch.Artifact
 	fetchErr      error
 	fetchErrByURL map[string]error
+
+	mu            sync.Mutex
 	fetchCalled   bool
 	fetchedURL    string
 	fetchedHeader http.Header
@@ -124,9 +142,11 @@ func (f *mockFetcher) Fetch(ctx context.Context, url string) (*fetch.Artifact, e
 }
 
 func (f *mockFetcher) FetchWithHeaders(_ context.Context, url string, headers http.Header) (*fetch.Artifact, error) {
+	f.mu.Lock()
 	f.fetchCalled = true
 	f.fetchedURL = url
 	f.fetchedHeader = headers.Clone()
+	f.mu.Unlock()
 	if f.fetchErrByURL != nil {
 		if err, ok := f.fetchErrByURL[url]; ok {
 			return nil, err
