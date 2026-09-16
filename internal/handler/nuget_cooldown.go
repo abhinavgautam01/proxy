@@ -21,6 +21,8 @@ var nugetRegistrationPrefixes = []string{
 	"/v3/registration5-gz-semver2/",
 }
 
+var nugetArtifactPrefixes = append([]string{"/v3-flatcontainer/"}, nugetRegistrationPrefixes...)
+
 const nugetRegistrationPath = "/v3/registration5-gz-semver2/"
 
 func (h *NuGetHandler) cooldownEnabled() bool {
@@ -300,18 +302,6 @@ func (h *NuGetHandler) expandNuGetPages(ctx context.Context, document map[string
 	return nil
 }
 
-func (h *NuGetHandler) applyCooldownFiltering(body []byte) ([]byte, error) {
-	if !h.cooldownEnabled() {
-		return body, nil
-	}
-	var document map[string]any
-	if err := json.Unmarshal(body, &document); err != nil {
-		return nil, err
-	}
-	h.filterNuGetRegistration(document, "")
-	return json.Marshal(document)
-}
-
 func (h *NuGetHandler) filterNuGetRegistration(document map[string]any, id string) bool {
 	items, ok := document["items"].([]any)
 	if !ok {
@@ -369,7 +359,7 @@ func (h *NuGetHandler) nugetProxyLink(link string) string {
 	if u.Host == upstream.Host {
 		path = strings.TrimPrefix(path, upstream.Path)
 	}
-	for _, prefix := range append([]string{"/v3-flatcontainer/"}, nugetRegistrationPrefixes...) {
+	for _, prefix := range nugetArtifactPrefixes {
 		if strings.HasPrefix(path, prefix) {
 			proxy, err := url.Parse(h.proxyURL + "/nuget" + path)
 			if err != nil {

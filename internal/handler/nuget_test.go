@@ -812,11 +812,6 @@ func TestNuGetCooldownFiltering(t *testing.T) {
 		},
 	}
 
-	body, err := json.Marshal(registration)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	proxy := testProxy()
 	proxy.Cooldown = &cooldown.Config{
 		Default: "3d",
@@ -827,17 +822,11 @@ func TestNuGetCooldownFiltering(t *testing.T) {
 		proxyURL: "http://localhost:8080",
 	}
 
-	filtered, err := h.applyCooldownFiltering(body)
-	if err != nil {
-		t.Fatal(err)
+	if !h.filterNuGetRegistration(registration, "") {
+		t.Fatal("expected registration items to be retained")
 	}
 
-	var result map[string]any
-	if err := json.Unmarshal(filtered, &result); err != nil {
-		t.Fatal(err)
-	}
-
-	pages := result["items"].([]any)
+	pages := registration["items"].([]any)
 	page := pages[0].(map[string]any)
 	items := page["items"].([]any)
 
@@ -851,7 +840,7 @@ func TestNuGetCooldownFiltering(t *testing.T) {
 	}
 
 	count := page["count"]
-	if count != float64(1) {
+	if count != 1 {
 		t.Errorf("expected page count to be 1, got %v", count)
 	}
 }
@@ -877,11 +866,6 @@ func TestNuGetCooldownFilteringWithPackageOverride(t *testing.T) {
 		},
 	}
 
-	body, err := json.Marshal(registration)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	proxy := testProxy()
 	proxy.Cooldown = &cooldown.Config{
 		Default:  "3d",
@@ -893,17 +877,11 @@ func TestNuGetCooldownFilteringWithPackageOverride(t *testing.T) {
 		proxyURL: "http://localhost:8080",
 	}
 
-	filtered, err := h.applyCooldownFiltering(body)
-	if err != nil {
-		t.Fatal(err)
+	if !h.filterNuGetRegistration(registration, "") {
+		t.Fatal("expected registration items to be retained")
 	}
 
-	var result map[string]any
-	if err := json.Unmarshal(filtered, &result); err != nil {
-		t.Fatal(err)
-	}
-
-	pages := result["items"].([]any)
+	pages := registration["items"].([]any)
 	page := pages[0].(map[string]any)
 	items := page["items"].([]any)
 
@@ -930,36 +908,20 @@ func TestNuGetCooldownNoCooldownConfig(t *testing.T) {
 		},
 	}
 
-	body, err := json.Marshal(registration)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// No cooldown - applyCooldownFiltering still works, just doesn't filter
+	// No cooldown: all registration items are retained.
 	h := &NuGetHandler{
 		proxy:    testProxy(),
 		proxyURL: "http://localhost:8080",
 	}
 
-	filtered, err := h.applyCooldownFiltering(body)
-	if err != nil {
-		t.Fatal(err)
+	if !h.filterNuGetRegistration(registration, "") {
+		t.Fatal("expected registration items to be retained")
 	}
 
-	var result map[string]any
-	if err := json.Unmarshal(filtered, &result); err != nil {
-		t.Fatal(err)
-	}
-
-	pages := result["items"].([]any)
+	pages := registration["items"].([]any)
 	page := pages[0].(map[string]any)
 	items := page["items"].([]any)
 
-	// Without cooldown config on the handler, applyCooldownFiltering
-	// is called but proxy.Cooldown is nil, so IsAllowed is never called
-	// Actually, applyCooldownFiltering always runs the filter logic -
-	// but the caller (handleRegistration) short-circuits when cooldown is disabled.
-	// The function itself should still work fine with a nil Cooldown.
 	if len(items) != 1 {
 		t.Fatalf("expected 1 item, got %d", len(items))
 	}
@@ -988,11 +950,6 @@ func TestNuGetCooldownFilteringNuGetTimestamp(t *testing.T) {
 		},
 	}
 
-	body, err := json.Marshal(registration)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	proxy := testProxy()
 	proxy.Cooldown = &cooldown.Config{
 		Default: "3d",
@@ -1003,17 +960,11 @@ func TestNuGetCooldownFilteringNuGetTimestamp(t *testing.T) {
 		proxyURL: "http://localhost:8080",
 	}
 
-	filtered, err := h.applyCooldownFiltering(body)
-	if err != nil {
-		t.Fatal(err)
+	if !h.filterNuGetRegistration(registration, "") {
+		t.Fatal("expected registration items to be retained")
 	}
 
-	var result map[string]any
-	if err := json.Unmarshal(filtered, &result); err != nil {
-		t.Fatal(err)
-	}
-
-	pages := result["items"].([]any)
+	pages := registration["items"].([]any)
 	page := pages[0].(map[string]any)
 	items := page["items"].([]any)
 
