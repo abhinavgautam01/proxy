@@ -845,7 +845,7 @@ func metadataStoragePath(ecosystem, cacheKey string) string {
 // cacheKey is typically the package name but can include subpath components.
 // Optional acceptHeaders specify the Accept header(s) to send; defaults to application/json.
 func (p *Proxy) FetchOrCacheMetadata(ctx context.Context, ecosystem, cacheKey, upstreamURL string, acceptHeaders ...string) ([]byte, string, error) {
-	body, contentType, _, err := p.fetchOrCacheMetadata(ctx, ecosystem, cacheKey, upstreamURL, "", acceptHeaders...)
+	body, contentType, _, err := p.fetchOrCacheMetadata(ctx, ecosystem, cacheKey, upstreamURL, "", nil, acceptHeaders...)
 	return body, contentType, err
 }
 
@@ -856,7 +856,9 @@ func (p *Proxy) FetchOrCacheMetadata(ctx context.Context, ecosystem, cacheKey, u
 // decompression so the wire bytes and their Content-Encoding are stored and
 // replayed as sent. The ProxyCached path uses "identity" for signed indexes and
 // "gzip" where both hops should stay compressed.
-func (p *Proxy) fetchOrCacheMetadata(ctx context.Context, ecosystem, cacheKey, upstreamURL, acceptEncoding string, acceptHeaders ...string) ([]byte, string, string, error) {
+// validate, when supplied, runs before caching or serving a document. Validation
+// failures follow the same stale-cache fallback path as upstream failures.
+func (p *Proxy) fetchOrCacheMetadata(ctx context.Context, ecosystem, cacheKey, upstreamURL, acceptEncoding string, validate func([]byte) error, acceptHeaders ...string) ([]byte, string, string, error) {
 	if containsPathTraversal(cacheKey) {
 		return nil, "", "", fmt.Errorf("invalid cache key: %q", cacheKey)
 	}
@@ -872,18 +874,14 @@ func (p *Proxy) fetchOrCacheMetadata(ctx context.Context, ecosystem, cacheKey, u
 	// Serve from cache if within TTL (skip upstream entirely)
 	if entry != nil && p.MetadataTTL > 0 && entry.FetchedAt.Valid {
 		if time.Since(entry.FetchedAt.Time) < p.MetadataTTL {
-			cached, readErr := p.Storage.Open(ctx, entry.StoragePath)
+			data, ct, readErr := p.readCachedMetadata(ctx, entry, validate)
 			if readErr == nil {
-				defer func() { _ = cached.Close() }()
-				data, readErr := p.ReadMetadata(cached)
-				if readErr == nil {
-					ct := contentTypeJSON
-					if entry.ContentType.Valid {
-						ct = entry.ContentType.String
-					}
-					metrics.RecordCacheHit(ecosystem)
-					return data, ct, entry.ContentEncoding.String, nil
-				}
+				metrics.RecordCacheHit(ecosystem)
+				return data, ct, entry.ContentEncoding.String, nil
+			}
+			if validate != nil {
+				// Do not revalidate an unusable cached body with its ETag.
+				entry = nil
 			}
 			// Cache file missing/unreadable, fall through to upstream
 		}
@@ -900,6 +898,9 @@ func (p *Proxy) fetchOrCacheMetadata(ctx context.Context, ecosystem, cacheKey, u
 	if errors.Is(err, errStale304) {
 		// 304 but cached file is gone; retry without ETag
 		meta, err = p.fetchUpstreamMetadata(ctx, upstreamURL, nil, accept, acceptEncoding)
+	}
+	if err == nil && validate != nil {
+		err = validate(meta.body)
 	}
 	if err == nil {
 		if p.CacheMetadata {
@@ -921,24 +922,34 @@ func (p *Proxy) fetchOrCacheMetadata(ctx context.Context, ecosystem, cacheKey, u
 	// (an identity blob swapped for a gzip one during rollout).
 	entry = p.currentMetadataEntry(ecosystem, cacheKey, entry)
 
-	cached, readErr := p.Storage.Open(ctx, entry.StoragePath)
+	data, ct, readErr := p.readCachedMetadata(ctx, entry, validate)
 	if readErr != nil {
-		return nil, "", "", fmt.Errorf("upstream failed and cached file missing: %w", err)
+		return nil, "", "", fmt.Errorf("upstream failed and cached metadata unusable (%v): %w", readErr, err)
+	}
+
+	p.Logger.Info("serving metadata from cache",
+		"ecosystem", ecosystem, "key", cacheKey)
+	return data, ct, entry.ContentEncoding.String, nil
+}
+
+func (p *Proxy) readCachedMetadata(ctx context.Context, entry *database.MetadataCacheEntry, validate func([]byte) error) ([]byte, string, error) {
+	cached, err := p.Storage.Open(ctx, entry.StoragePath)
+	if err != nil {
+		return nil, "", err
 	}
 	defer func() { _ = cached.Close() }()
-
-	data, readErr := p.ReadMetadata(cached)
-	if readErr != nil {
-		return nil, "", "", fmt.Errorf("upstream failed and cached read error: %w", err)
+	data, err := p.ReadMetadata(cached)
+	if err == nil && validate != nil {
+		err = validate(data)
 	}
-
+	if err != nil {
+		return nil, "", err
+	}
 	ct := contentTypeJSON
 	if entry.ContentType.Valid {
 		ct = entry.ContentType.String
 	}
-	p.Logger.Info("serving metadata from cache",
-		"ecosystem", ecosystem, "key", cacheKey)
-	return data, ct, entry.ContentEncoding.String, nil
+	return data, ct, nil
 }
 
 func (p *Proxy) recordMetadataCacheMiss(ecosystem string) {
@@ -1133,7 +1144,7 @@ func (p *Proxy) proxyCachedWithEncoding(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	body, contentType, contentEncoding, err := p.fetchOrCacheMetadata(r.Context(), ecosystem, cacheKey, upstreamURL, acceptEncoding, acceptHeaders...)
+	body, contentType, contentEncoding, err := p.fetchOrCacheMetadata(r.Context(), ecosystem, cacheKey, upstreamURL, acceptEncoding, nil, acceptHeaders...)
 	if err != nil {
 		if errors.Is(err, ErrUpstreamNotFound) {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -1294,12 +1305,19 @@ func (p *Proxy) getOrFetchArtifactFromURLWithCachePURLs(ctx context.Context, eco
 		return cached, nil
 	}
 	metrics.RecordCacheMiss(ecosystem)
+	return p.coalescedFetchFromURL(ctx, ecosystem, name, version, filename, pkgPURL, versionPURL, downloadURL, headers, upstreamHash)
+}
 
+// coalescedFetchFromURL fetches an artifact the cache could not serve, sharing
+// the fetch with concurrent callers. The caller running it discards a stale
+// entry under the key, where it cannot delete a fetch that just replaced it.
+func (p *Proxy) coalescedFetchFromURL(ctx context.Context, ecosystem, name, version, filename, pkgPURL, versionPURL, downloadURL string, headers http.Header, upstreamHash string) (*CacheResult, error) {
 	key := artifactCoalesceKey(versionPURL, filename, downloadURL, upstreamHash)
 	recheck := func() (artifacts.Artifact, string, bool) {
 		return p.cachedArtifactRecord(pkgPURL, versionPURL, filename, upstreamHash)
 	}
 	return p.coalesceFetch(ctx, key, recheck, func(fetchCtx context.Context) (artifacts.Artifact, string, error) {
+		p.discardStaleArtifact(fetchCtx, pkgPURL, versionPURL, filename, upstreamHash)
 		return p.fetchAndCacheFromURL(fetchCtx, ecosystem, name, version, filename, pkgPURL, versionPURL, downloadURL, headers, upstreamHash)
 	})
 }
@@ -1308,8 +1326,9 @@ func (p *Proxy) getOrFetchArtifactFromURLWithCachePURLs(ctx context.Context, eco
 // content hash matches the checksum the upstream currently declares for it.
 // This detects an upstream re-publishing under the same version, which the
 // stream integrity check in checkCache cannot: that check only verifies the
-// stored blob against the hash recorded when it was cached. On mismatch the
-// stale entry is discarded and nil is returned so the caller re-fetches.
+// stored blob against the hash recorded when it was cached. A stale entry is
+// a miss and is left in place: the fetch that replaces it discards it under
+// the coalescing key.
 func (p *Proxy) getCachedArtifactWithUpstreamHash(ctx context.Context, pkgPURL, versionPURL, filename, upstreamHash string) (*CacheResult, error) {
 	cached, err := p.checkCache(ctx, pkgPURL, versionPURL, filename)
 	if err != nil || cached == nil {
@@ -1318,14 +1337,28 @@ func (p *Proxy) getCachedArtifactWithUpstreamHash(ctx context.Context, pkgPURL, 
 	if artifactHashMatches(cached.Artifact.Digest.Encoded(), upstreamHash) {
 		return cached, nil
 	}
-
 	if cached.Reader != nil {
 		_ = cached.Reader.Close()
 	}
-	p.Logger.Warn("cached artifact hash disagrees with upstream metadata, discarding",
-		"purl", versionPURL, "filename", filename, "cached", cached.Artifact.Digest.Encoded(), "upstream", upstreamHash)
-	p.discardCachedArtifact(ctx, versionPURL, filename, cached.storagePath)
 	return nil, nil
+}
+
+// discardStaleArtifact removes the cached entry when its digest disagrees
+// with upstreamHash. It runs under the coalescing key, after the recheck, so
+// an entry a previous fetch refreshed is kept.
+func (p *Proxy) discardStaleArtifact(ctx context.Context, pkgPURL, versionPURL, filename, upstreamHash string) {
+	record, err := p.DB.GetCachedArtifact(pkgPURL, versionPURL, filename)
+	if err != nil {
+		p.Logger.Warn("failed to read cache record before refetch",
+			"purl", versionPURL, "filename", filename, "error", err)
+		return
+	}
+	if record == nil || artifactHashMatches(record.Artifact.Digest.Encoded(), upstreamHash) {
+		return
+	}
+	p.Logger.Warn("cached artifact hash disagrees with upstream metadata, discarding",
+		"purl", versionPURL, "filename", filename, "cached", record.Artifact.Digest.Encoded(), "upstream", upstreamHash)
+	p.discardCachedArtifact(ctx, versionPURL, filename, record.StoragePath)
 }
 
 func (p *Proxy) fetchAndCacheFromURL(ctx context.Context, ecosystem, name, version, filename, pkgPURL, versionPURL, downloadURL string, headers http.Header, upstreamHash string) (artifacts.Artifact, string, error) {
