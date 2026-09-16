@@ -147,7 +147,7 @@ func TestDebianHandler_MetadataCacheKeysDoNotCollideAcrossRepositories(t *testin
 		"security": securityArchive.URL,
 	})
 
-	// Main archive path whose separator-based key is "security_dists_..." .
+	// Main archive path whose separator-based key is "security_dists_...".
 	first := serveDebianRequest(h, "/dists/security/dists/trixie/InRelease")
 	if first.Code != http.StatusOK || first.Body.String() != mainRelease {
 		t.Fatalf("main archive: status = %d, body = %q, want 200 %q",
