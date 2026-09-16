@@ -494,10 +494,9 @@ upstream:
   debian: "http://archive.ubuntu.com/ubuntu"
 ```
 
-A Debian release is served by more than one archive: security updates live on
-a separate host from the main archive, so one upstream URL cannot cover a
-complete suite set. Additional archives are configured under
-`upstream.debian_repositories` and served at `/debian/{name}/`:
+A release's security updates are served by a separate archive, so additional
+archives are configured under `upstream.debian_repositories` and served at
+`/debian/{name}/`:
 
 ```yaml
 upstream:
@@ -512,9 +511,7 @@ deb http://localhost:8080/debian/security trixie-security main
 ```
 
 `upstream.debian` keeps serving `/debian/pool/…` and `/debian/dists/…`
-unchanged, so adding repositories does not affect existing sources.list
-entries. A repository name shadows the main archive's root path of the same
-name; `pool` and `dists` are refused for that reason.
+unchanged. See [Debian archives](docs/configuration.md#debian-archives).
 
 ### RPM / Yum / DNF
 

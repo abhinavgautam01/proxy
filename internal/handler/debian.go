@@ -17,10 +17,8 @@ const (
 // DebianHandler handles APT/Debian repository protocol requests.
 // It proxies requests to upstream Debian/Ubuntu repositories and caches .deb packages.
 //
-// The upstream given at /debian/ is the main archive. Additional archives are
-// mounted at /debian/{repository}/, which is what makes a complete suite set
-// reachable: security updates for a Debian release are served by a different
-// archive than the main one, so one upstream URL cannot cover both.
+// The main archive is served at /debian/. Additional archives are mounted at
+// /debian/{repository}/ and the remaining path mirrors the upstream layout.
 type DebianHandler struct {
 	proxy        *Proxy
 	upstreamURL  string
@@ -29,12 +27,7 @@ type DebianHandler struct {
 }
 
 // NewDebianHandler creates a new Debian/APT protocol handler.
-//
-// upstreamURL is the main archive, served at /debian/. repositories maps names
-// to additional archives, each served at /debian/{name}/; it may be empty, in
-// which case only the main archive is reachable. A repository name shadows the
-// main archive's root path of the same name, so config validation reserves
-// "pool" and "dists" (see UpstreamConfig.Validate).
+// When repositories is empty, only the main archive is reachable.
 func NewDebianHandler(
 	proxy *Proxy,
 	proxyURL string,
@@ -72,14 +65,10 @@ func (h *DebianHandler) Routes() http.Handler {
 			return
 		}
 
-		// The main archive's own prefixes are matched first, so an empty
-		// repository map leaves behaviour exactly as it was before named
-		// repositories existed.
-		//
-		// An unconfigured first segment is not an error here, unlike the APK
-		// handler's 404: the main archive is unnamed and serves paths of its
-		// own at the root (README, indices/, project/), so an unknown name
-		// stays a main-archive path. This is deliberate, not an oversight.
+		// Unlike the APK handler, an unconfigured first segment is not a 404:
+		// the main archive is unnamed and serves paths of its own at the root
+		// (README, indices/, project/), so an unknown name stays a
+		// main-archive path.
 		upstreamURL, repository, rest := h.upstreamURL, "", path
 		if !strings.HasPrefix(path, "pool/") && !strings.HasPrefix(path, "dists/") {
 			if name, tail, ok := strings.Cut(path, "/"); ok && tail != "" {
@@ -151,11 +140,9 @@ func (h *DebianHandler) handleMetadata(
 	h.proxy.ProxyCached(w, r, fmt.Sprintf("%s/%s", upstreamURL, path), "debian", cacheKey, "*/*")
 }
 
-// artifactCacheFilename returns the artifact cache filename for a package.
-//
-// The same filename can hold different bytes in different archives, so a named
-// repository scopes the entry by name. The main archive keeps the unscoped
-// filename its existing cache entries were stored under.
+// artifactCacheFilename scopes a package by repository, since the same
+// filename can hold different bytes in different archives. The main archive
+// keeps the unscoped filename its existing cache entries were stored under.
 func (h *DebianHandler) artifactCacheFilename(repository, filename string) string {
 	if repository == "" {
 		return filename
@@ -163,14 +150,9 @@ func (h *DebianHandler) artifactCacheFilename(repository, filename string) strin
 	return repository + "/" + filename
 }
 
-// metadataCacheKeyFor returns the metadata cache key for a request.
-//
-// The main archive keeps its separator-based key so existing cache entries
-// stay valid. A named repository hashes its name, its upstream URL, and the
-// path instead: that keeps distinct repositories from sharing entries
-// (repository names may contain '_', which the separator-based key would
-// render ambiguous) and drops cached entries when a repository is repointed at
-// a different upstream, mirroring APKHandler.metadataCacheKey.
+// metadataCacheKeyFor returns the metadata cache key for a request. The main
+// archive keeps its separator-based key so existing cache entries stay valid;
+// a named repository hashes its identity as APKHandler.metadataCacheKey does.
 func (h *DebianHandler) metadataCacheKeyFor(repository, upstreamURL, path string) string {
 	if repository == "" {
 		return strings.ReplaceAll(path, "/", "_")

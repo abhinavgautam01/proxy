@@ -174,10 +174,8 @@ upstream:
   # Debian/APT repository URL (used by /debian endpoint)
   debian: "http://deb.debian.org/debian"
 
-  # Additional Debian/APT archives, served at /debian/{name}/. A release's
-  # security updates live on a different host than the main archive above, so
-  # one URL cannot serve a complete suite set. The names "pool" and "dists"
-  # are reserved for the main archive's own paths.
+  # Additional Debian/APT archives, served at /debian/{name}/.
+  # The names "pool" and "dists" are reserved for the main archive's own paths.
   debian_repositories:
     security: "https://security.debian.org/debian-security"
 

@@ -36,9 +36,7 @@ func TestDebianHandler_Routes(t *testing.T) {
 
 // TestDebianHandler_LegacyCacheKeysUnchanged pins the cache identities the
 // main archive used before named repositories existed. Deployments carry warm
-// caches across upgrades, so a changed key here silently discards them: these
-// literals are the backward-compatibility contract, not an implementation
-// detail.
+// caches across upgrades, so a changed key here silently discards them.
 func TestDebianHandler_LegacyCacheKeysUnchanged(t *testing.T) {
 	const (
 		poolPath = "pool/main/h/hello/hello_2.10-3_amd64.deb"
@@ -71,8 +69,7 @@ func TestDebianHandler_LegacyCacheKeysUnchanged(t *testing.T) {
 
 // TestDebianHandler_NamedRepositoryRouting checks that a named repository
 // reaches its own archive while the main archive keeps serving /dists/ and
-// /pool/ unchanged. This is the case the separate-archive layout requires: a
-// release's security updates are not on the main archive host.
+// /pool/ unchanged.
 func TestDebianHandler_NamedRepositoryRouting(t *testing.T) {
 	mainRelease := "main archive InRelease"
 	mainArchive := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -109,7 +106,6 @@ func TestDebianHandler_NamedRepositoryRouting(t *testing.T) {
 			got.Code, got.Body.String(), securityRelease)
 	}
 
-	// The main archive must be unaffected by the presence of the map.
 	got = serveDebianRequest(h, "/dists/trixie/InRelease")
 	if got.Code != http.StatusOK || got.Body.String() != mainRelease {
 		t.Errorf("main archive: status = %d, body = %q, want 200 %q",
@@ -117,7 +113,7 @@ func TestDebianHandler_NamedRepositoryRouting(t *testing.T) {
 	}
 
 	// An unconfigured name is not a repository, so it addresses the main
-	// archive as a plain path, which is what happened before this feature.
+	// archive as a plain path.
 	got = serveDebianRequest(h, "/unknown/dists/trixie/InRelease")
 	if got.Code == http.StatusOK {
 		t.Errorf("unknown repository: status = 200, want the main archive's 404")
@@ -127,7 +123,8 @@ func TestDebianHandler_NamedRepositoryRouting(t *testing.T) {
 // TestDebianHandler_MetadataCacheKeysDoNotCollideAcrossRepositories guards the
 // hashed metadata cache key. The main archive's key replaces '/' with '_', so
 // a repository named "security" serving dists/trixie/InRelease would otherwise
-// collide with the main archive's own security_dists_trixie_InRelease entry.
+// collide with the main archive's own security_dists_trixie_InRelease entry,
+// serving one archive's signed metadata to clients of the other.
 func TestDebianHandler_MetadataCacheKeysDoNotCollideAcrossRepositories(t *testing.T) {
 	mainRelease := "main archive InRelease"
 	mainArchive := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -557,19 +557,7 @@ type UpstreamConfig struct {
 	Debian string `json:"debian" yaml:"debian"`
 
 	// DebianRepositories maps repository names to additional APT repository
-	// base URLs, served at /debian/{name}/. The remaining request path
-	// mirrors the upstream layout, e.g.
-	// /debian/security/dists/trixie-security/InRelease.
-	//
-	// This exists because a Debian release is served by more than one
-	// archive: security updates live on a separate host from the main
-	// archive, so a single upstream URL cannot serve a complete suite set.
-	//
-	// A repository name shadows the Debian upstream's root path of the same
-	// name, so requests for /debian/{name}/... reach the named archive
-	// instead. The names "pool" and "dists" are refused for that reason;
-	// other root paths an archive may serve (indices, project, doc, tools)
-	// are not, so avoid those names unless the shadowing is intended.
+	// base URLs, served at /debian/{name}/.
 	// Example: {"security": "https://security.debian.org/debian-security"}.
 	DebianRepositories map[string]string `json:"debian_repositories" yaml:"debian_repositories"`
 
@@ -676,8 +664,7 @@ func (u *UpstreamConfig) Validate() error {
 }
 
 // debianReservedRepositoryNames are the upstream.debian archive's own root
-// paths. A repository of the same name would shadow them, so they are refused
-// rather than silently ignored.
+// paths, which a repository of the same name would shadow.
 var debianReservedRepositoryNames = []string{"pool", "dists"}
 
 func validateNamedUpstreams(field string, upstreams map[string]string) error {
