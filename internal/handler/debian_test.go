@@ -120,6 +120,51 @@ func TestDebianHandler_NamedRepositoryRouting(t *testing.T) {
 	}
 }
 
+// TestDebianHandler_UnknownRepositoryReportsConfiguredNames covers a misspelled
+// repository name. {name}/dists/ is never a main-archive path, so the handler
+// answers directly rather than forwarding upstream, where the reply would be an
+// opaque HTML 404 that does not mention the repository at all.
+func TestDebianHandler_UnknownRepositoryReportsConfiguredNames(t *testing.T) {
+	var upstreamHits int
+	mainArchive := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamHits++
+		http.Error(w, "<html>404 Not Found</html>", http.StatusNotFound)
+	}))
+	defer mainArchive.Close()
+
+	proxy, _, _, _ := setupTestProxy(t)
+	proxy.HTTPClient = http.DefaultClient
+
+	h := NewDebianHandler(proxy, "http://proxy.example", mainArchive.URL, map[string]string{
+		"security": "http://security.example",
+		"ghcli":    "http://ghcli.example",
+	})
+
+	got := serveDebianRequest(h, "/secuirty/dists/trixie-security/InRelease")
+	if got.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", got.Code, http.StatusNotFound)
+	}
+	body := got.Body.String()
+	if !strings.Contains(body, `"secuirty"`) {
+		t.Errorf("body = %q, want it to name the misspelled repository", body)
+	}
+	// Sorted, so the message is stable across map iteration order.
+	if !strings.Contains(body, "ghcli, security") {
+		t.Errorf("body = %q, want it to list the configured repositories", body)
+	}
+	if upstreamHits != 0 {
+		t.Errorf("upstream hits = %d, want 0: the handler should answer without forwarding", upstreamHits)
+	}
+
+	// A root-level main-archive path still falls through, since the main
+	// archive really does serve files of its own there.
+	got = serveDebianRequest(h, "/project/trace/README")
+	if got.Code != http.StatusNotFound || upstreamHits != 1 {
+		t.Errorf("main-archive path: status = %d, upstream hits = %d, want 404 and 1",
+			got.Code, upstreamHits)
+	}
+}
+
 // TestDebianHandler_MetadataCacheKeysDoNotCollideAcrossRepositories guards the
 // hashed metadata cache key. The main archive's key replaces '/' with '_', so
 // a repository named "security" serving dists/trixie/InRelease would otherwise

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -74,6 +75,13 @@ func (h *DebianHandler) Routes() http.Handler {
 			if name, tail, ok := strings.Cut(path, "/"); ok && tail != "" {
 				if named, found := h.repositories[name]; found {
 					upstreamURL, repository, rest = named, name, tail
+				} else if strings.HasPrefix(tail, "dists/") || strings.HasPrefix(tail, "pool/") {
+					// The main archive has no {name}/dists/ or {name}/pool/ of
+					// its own, so this is a misspelled repository rather than a
+					// main-archive path. Answering here keeps a typo from
+					// surfacing as the upstream's opaque HTML 404.
+					h.repositoryNotFound(w, name)
+					return
 				}
 			}
 		}
@@ -91,6 +99,28 @@ func (h *DebianHandler) Routes() http.Handler {
 			h.proxyFile(w, r, upstreamURL, rest)
 		}
 	})
+}
+
+// repositoryNotFound answers a request addressed to a repository that is not
+// configured, naming the ones that are so a misspelling is self-evident.
+func (h *DebianHandler) repositoryNotFound(w http.ResponseWriter, name string) {
+	if len(h.repositories) == 0 {
+		http.Error(w,
+			fmt.Sprintf("unknown debian repository %q: none are configured", name),
+			http.StatusNotFound)
+		return
+	}
+
+	configured := make([]string, 0, len(h.repositories))
+	for repository := range h.repositories {
+		configured = append(configured, repository)
+	}
+	sort.Strings(configured)
+
+	http.Error(w,
+		fmt.Sprintf("unknown debian repository %q: configured repositories are %s",
+			name, strings.Join(configured, ", ")),
+		http.StatusNotFound)
 }
 
 // handlePackageDownload fetches and caches .deb packages from the pool.
