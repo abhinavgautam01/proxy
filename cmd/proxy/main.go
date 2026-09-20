@@ -112,6 +112,7 @@ import (
 
 	"github.com/git-pkgs/proxy/internal/config"
 	"github.com/git-pkgs/proxy/internal/database"
+	"github.com/git-pkgs/proxy/internal/denylist"
 	"github.com/git-pkgs/proxy/internal/handler"
 	"github.com/git-pkgs/proxy/internal/mirror"
 	"github.com/git-pkgs/proxy/internal/server"
@@ -517,6 +518,11 @@ func runMirror() {
 	fetcher := fetch.NewFetcher()
 	resolver := fetch.NewResolver()
 	proxy := handler.NewProxy(db, store, fetcher, resolver, logger)
+	proxy.Denylist, err = denylist.New(cfg.Denylist.Packages)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid denylist: %v\n", err)
+		return
+	}
 	proxy.CacheMetadata = true // mirror always caches metadata
 	proxy.MetadataTTL = cfg.ParseMetadataTTL()
 	proxy.MetadataMaxSize = cfg.ParseMetadataMaxSize()

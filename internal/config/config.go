@@ -71,6 +71,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/git-pkgs/proxy/internal/denylist"
 	"github.com/git-pkgs/purl"
 	"gopkg.in/yaml.v3"
 )
@@ -114,6 +115,9 @@ type Config struct {
 
 	// Cooldown configures version age filtering to mitigate supply chain attacks.
 	Cooldown CooldownConfig `json:"cooldown" yaml:"cooldown"`
+
+	// Denylist blocks explicitly configured package versions.
+	Denylist DenylistConfig `json:"denylist" yaml:"denylist"`
 
 	// Scanning configures pre-cache artifact scanning (trivy, ClamAV, Wiz,
 	// or a custom service) to mitigate supply chain attacks.
@@ -1018,6 +1022,10 @@ func (c *Config) Validate() error {
 }
 
 func (c *Config) validateComponents() error {
+	if _, err := denylist.New(c.Denylist.Packages); err != nil {
+		return err
+	}
+
 	if err := c.Upstream.Validate(); err != nil {
 		return err
 	}

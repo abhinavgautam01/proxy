@@ -190,7 +190,7 @@ func (h *ContainerHandler) handleBlobDownload(w http.ResponseWriter, r *http.Req
 			h.containerError(w, http.StatusNotFound, "BLOB_UNKNOWN", "blob unknown to registry")
 			return
 		}
-		if errors.Is(err, ErrArtifactBlocked) {
+		if errors.Is(err, ErrArtifactBlocked) || errors.Is(err, ErrVersionDenied) {
 			h.containerError(w, http.StatusForbidden, "DENIED", err.Error())
 			return
 		}

@@ -117,7 +117,7 @@ func (h *GoHandler) handleDownload(w http.ResponseWriter, r *http.Request, modul
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		if errors.Is(err, ErrArtifactBlocked) {
+		if errors.Is(err, ErrArtifactBlocked) || errors.Is(err, ErrVersionDenied) {
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}

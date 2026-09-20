@@ -179,12 +179,22 @@ func TestStartUsesConfiguredLoopbackUpstreams(t *testing.T) {
 	}
 }
 
+func assertLoopbackPyPIMetadata(t *testing.T, body []byte) {
+	t.Helper()
+	if !strings.Contains(string(body), `"name":"ruff"`) {
+		t.Fatalf("response body = %s, want PyPI metadata", body)
+	}
+	if strings.Contains(string(body), "ruff-1.0.0") || !strings.Contains(string(body), "ruff-2.0.0") {
+		t.Fatalf("configured denylist not applied: %s", body)
+	}
+}
+
 func testStartUsesConfiguredLoopbackUpstreams(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/pypi/simple/ruff/":
 			w.Header().Set("Content-Type", "application/vnd.pypi.simple.v1+json")
-			_, _ = io.WriteString(w, `{"meta":{"api-version":"1.4"},"name":"ruff","files":[]}`)
+			_, _ = io.WriteString(w, `{"meta":{"api-version":"1.4"},"name":"ruff","files":[{"filename":"ruff-1.0.0.tar.gz","url":"ruff-1.0.0.tar.gz"},{"filename":"ruff-2.0.0.tar.gz","url":"ruff-2.0.0.tar.gz"}]}`)
 		case "/v2/library/demo/manifests/latest":
 			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
 			_, _ = io.WriteString(w, `{"schemaVersion":2}`)
@@ -212,6 +222,7 @@ func testStartUsesConfiguredLoopbackUpstreams(t *testing.T) {
 	cfg.Upstream.PyPIDownload = upstream.URL + "/pypi"
 	cfg.Upstream.OCIDefault = upstream.URL
 	cfg.Upstream.AllowLoopback = true
+	cfg.Denylist.Packages = []string{"pkg:pypi/ruff@1.0.0"}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("validating config: %v", err)
 	}
@@ -255,9 +266,7 @@ func testStartUsesConfiguredLoopbackUpstreams(t *testing.T) {
 			if resp.StatusCode != http.StatusOK {
 				t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusOK, body)
 			}
-			if !strings.Contains(string(body), `"name":"ruff"`) {
-				t.Fatalf("response body = %s, want PyPI metadata", body)
-			}
+			assertLoopbackPyPIMetadata(t, body)
 			break
 		}
 		if time.Now().After(deadline) {

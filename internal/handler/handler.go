@@ -19,6 +19,7 @@ import (
 	"github.com/git-pkgs/artifacts"
 	"github.com/git-pkgs/cooldown"
 	"github.com/git-pkgs/proxy/internal/database"
+	"github.com/git-pkgs/proxy/internal/denylist"
 	"github.com/git-pkgs/proxy/internal/metrics"
 	"github.com/git-pkgs/proxy/internal/packageurl"
 	"github.com/git-pkgs/proxy/internal/scanner"
@@ -155,6 +156,7 @@ type Proxy struct {
 	Resolver            *fetch.Resolver
 	Logger              *slog.Logger
 	Cooldown            *cooldown.Config
+	Denylist            *denylist.Policy
 	CacheMetadata       bool
 	MetadataTTL         time.Duration
 	MetadataMaxSize     int64
@@ -274,6 +276,9 @@ func (p *Proxy) ClearCachedArtifact(ctx context.Context, ecosystem, name, versio
 
 // checkCache looks up an artifact in the cache. Returns nil if not cached.
 func (p *Proxy) checkCache(ctx context.Context, pkgPURL, versionPURL, filename string) (*CacheResult, error) {
+	if p.Denylist.Denied(versionPURL) {
+		return nil, fmt.Errorf("%w: %s", ErrVersionDenied, versionPURL)
+	}
 	artifact, err := p.DB.GetCachedArtifact(pkgPURL, versionPURL, filename)
 	if err != nil {
 		return nil, fmt.Errorf("checking artifact cache: %w", err)
@@ -815,15 +820,18 @@ var ErrUpstreamNotFound = fmt.Errorf("upstream: %w", fetch.ErrNotFound)
 // ErrArtifactBlocked indicates a pre-cache security scan blocked the artifact.
 var ErrArtifactBlocked = errors.New("artifact blocked by security scan")
 
+// ErrVersionDenied indicates an operator explicitly denied this package version.
+var ErrVersionDenied = errors.New("package version blocked by denylist")
+
 // serveArtifactError writes response for a failed fetch:
-// 404 when upstream reports artifact missing, 403 when a security scan
-// blocked the artifact, 502 otherwise.
+// 404 when upstream reports artifact missing, 403 when a security scan or
+// denylist blocked the artifact, 502 otherwise.
 func (p *Proxy) serveArtifactError(w http.ResponseWriter, err error, clientMsg string) {
 	if errors.Is(err, ErrUpstreamNotFound) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	if errors.Is(err, ErrArtifactBlocked) {
+	if errors.Is(err, ErrArtifactBlocked) || errors.Is(err, ErrVersionDenied) {
 		JSONError(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -1299,6 +1307,10 @@ func (p *Proxy) getOrFetchArtifactFromURL(ctx context.Context, ecosystem, name, 
 }
 
 func (p *Proxy) getOrFetchArtifactFromURLWithCachePURLs(ctx context.Context, ecosystem, name, version, filename, pkgPURL, versionPURL, downloadURL string, headers http.Header, upstreamHash string) (*CacheResult, error) {
+	// Some protocols use qualified cache keys. Check their package identity too.
+	if p.versionDenied(ecosystem, name, version) {
+		return nil, fmt.Errorf("%w: %s", ErrVersionDenied, canonicalVersionPURL(ecosystem, name, version))
+	}
 	if cached, err := p.getCachedArtifactWithUpstreamHash(ctx, pkgPURL, versionPURL, filename, upstreamHash); err != nil {
 		return nil, err
 	} else if cached != nil {

@@ -68,6 +68,7 @@ import (
 	"github.com/git-pkgs/proxy/internal/accesslog"
 	"github.com/git-pkgs/proxy/internal/config"
 	"github.com/git-pkgs/proxy/internal/database"
+	"github.com/git-pkgs/proxy/internal/denylist"
 	"github.com/git-pkgs/proxy/internal/enrichment"
 	"github.com/git-pkgs/proxy/internal/handler"
 	upstreamhttp "github.com/git-pkgs/proxy/internal/httpclient"
@@ -238,6 +239,11 @@ func (s *Server) serve(listener net.Listener) error {
 	proxy.HTTPClient = &metadataClient
 	proxy.AuthForURL = s.authForURL
 	proxy.Cooldown = cd
+	policy, err := denylist.New(s.cfg.Denylist.Packages)
+	if err != nil {
+		return fmt.Errorf("configuring denylist: %w", err)
+	}
+	proxy.Denylist = policy
 	scanGroup, err := configureScanning(proxy, s.cfg.Scanning, s.cfg.BaseURL, s.logger)
 	if err != nil {
 		return fmt.Errorf("configuring scanners: %w", err)
