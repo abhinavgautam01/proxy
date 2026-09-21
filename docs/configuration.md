@@ -403,6 +403,44 @@ Currently supported for npm, PyPI, pub.dev, Composer, Cargo, NuGet, Conda, RubyG
 
 Note: Hex cooldown requires disabling registry signature verification since the proxy re-encodes the protobuf payload without the original signature. Set `HEX_NO_VERIFY_REPO_ORIGIN=1` or configure your repo with `no_verify: true`.
 
+## Version denylist
+
+Block exact package versions independently of cooldown and artifact scanning:
+
+```yaml
+denylist:
+  packages:
+    - "pkg:pypi/requests@2.31.0"
+    - "pkg:cargo/some-crate@1.2.3"
+    - "pkg:npm/%40scope/example@4.5.6"
+```
+
+Entries must be versioned PURLs without qualifiers or subpaths. Package names
+are canonicalized (including PyPI case/separator normalization and npm scopes);
+versions match exactly, not by range or glob. Invalid entries prevent startup.
+An empty list disables the policy. Restart the proxy after changing the list.
+
+Denied versions are removed from npm packuments, Cargo sparse indexes, and PyPI
+simple HTML/JSON and release metadata, including responses served from cached
+metadata during an upstream outage. No publication timestamp or enabled cooldown
+is required. npm tags pointing at denied versions are removed; `latest` is moved
+to the highest remaining stable version when available. Other tags are not
+retargeted. PyPI version-specific JSON endpoints return 404 for denied versions.
+
+The shared artifact download pipeline returns 403 for denied package/version
+identities before reading storage, issuing a signed redirect, or fetching bytes.
+This also applies to mirror downloads and recognized Debian package downloads.
+Existing cached artifacts are retained, so removing a denial restores access.
+Already-issued storage URLs and clients' local caches cannot be revoked by this
+configuration.
+
+Metadata filtering currently covers npm, PyPI, and Cargo. Other ecosystems'
+metadata is unchanged; in particular, APT indexes cannot be rewritten without
+regenerating their checksums and signatures. Pass-through resources without a
+resolved package/version identity are not covered. This is an explicit operator
+policy, not automatic CVE detection or cache re-scanning. Exact pins or dependency
+constraints may still make an install fail when no allowed version can satisfy it.
+
 ## Artifact Scanning
 
 Cooldown only ever looks at a version's *publish timestamp* — it never inspects the actual bytes of an artifact. Artifact scanning runs after a fetched artifact is staged into storage but before it becomes visible from cache, so an external scanner (trivy, ClamAV, Wiz, or any custom service) can block a bad verdict from ever reaching a client.

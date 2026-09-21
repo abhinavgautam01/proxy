@@ -96,6 +96,10 @@ func (h *NPMHandler) handlePackageMetadata(w http.ResponseWriter, r *http.Reques
 
 	rewritten, err := h.rewriteMetadata(packageName, body)
 	if err != nil {
+		if len(h.proxy.Denylist.Versions(canonicalPackagePURL("npm", packageName))) != 0 {
+			JSONError(w, http.StatusBadGateway, "failed to filter package metadata")
+			return
+		}
 		// If rewriting fails, just proxy the original
 		h.proxy.Logger.Warn("failed to rewrite metadata, proxying original", "error", err)
 		w.Header().Set(headerContentType, contentTypeJSON)
@@ -120,10 +124,14 @@ func (h *NPMHandler) rewriteMetadata(packageName string, body []byte) ([]byte, e
 	// Rewrite tarball URLs in versions
 	versions, ok := metadata["versions"].(map[string]any)
 	if !ok {
+		if len(h.proxy.Denylist.Versions(canonicalPackagePURL("npm", packageName))) != 0 {
+			return nil, errors.New("npm metadata has no versions object")
+		}
 		return body, nil // No versions to rewrite
 	}
 
 	h.applyCooldownFiltering(metadata, versions, packageName)
+	h.applyDenylistFiltering(metadata, versions, packageName)
 	h.rewriteTarballURLs(versions, packageName)
 
 	return json.Marshal(metadata)
@@ -290,7 +298,7 @@ func (h *NPMHandler) handleDownload(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, ErrUpstreamNotFound):
 			JSONError(w, http.StatusNotFound, "package not found")
-		case errors.Is(err, ErrArtifactBlocked):
+		case errors.Is(err, ErrArtifactBlocked), errors.Is(err, ErrVersionDenied):
 			JSONError(w, http.StatusForbidden, err.Error())
 		default:
 			h.proxy.Logger.Error("failed to get artifact", "error", err)

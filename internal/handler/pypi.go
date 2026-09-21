@@ -118,15 +118,26 @@ func (h *PyPIHandler) handleSimplePackage(w http.ResponseWriter, r *http.Request
 	if h.proxy.Cooldown != nil && h.proxy.Cooldown.Enabled() {
 		filteredVersions = h.fetchFilteredVersions(r, name)
 	}
+	for version := range h.proxy.Denylist.Versions(canonicalPackagePURL("pypi", name)) {
+		if filteredVersions == nil {
+			filteredVersions = make(map[string]bool)
+		}
+		filteredVersions[version] = true
+	}
 
 	var rewritten []byte
 	if isJSONMediaType(contentType) {
 		rewritten, err = h.rewriteSimpleJSON(body, filteredVersions)
 		if err != nil {
+			if len(h.proxy.Denylist.Versions(canonicalPackagePURL("pypi", name))) != 0 {
+				http.Error(w, "failed to filter package metadata", http.StatusBadGateway)
+				return
+			}
 			h.proxy.Logger.Warn("failed to rewrite pypi simple json, proxying original", "error", err)
 			rewritten = body
 		}
 	} else {
+		body = h.filterSimpleHTMLLinks(body, filteredVersions)
 		rewritten = h.rewriteSimpleHTML(body, filteredVersions)
 	}
 
@@ -378,6 +389,10 @@ func (h *PyPIHandler) handleVersionJSON(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
+	if h.proxy.versionDenied("pypi", name, version) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
 
 	h.proxy.Logger.Info("pypi version json request", "package", name, "version", version)
 
@@ -400,6 +415,10 @@ func (h *PyPIHandler) proxyAndRewriteJSON(w http.ResponseWriter, r *http.Request
 
 	rewritten, err := h.rewriteJSONMetadata(body)
 	if err != nil {
+		if len(h.proxy.Denylist.Versions(canonicalPackagePURL("pypi", r.PathValue("name")))) != 0 {
+			http.Error(w, "failed to filter package metadata", http.StatusBadGateway)
+			return
+		}
 		h.proxy.Logger.Warn("failed to rewrite metadata, proxying original", "error", err)
 		w.Header().Set(headerContentType, "application/json")
 		_, _ = w.Write(body)
@@ -439,8 +458,8 @@ func (h *PyPIHandler) filterAndRewriteReleases(metadata map[string]any, packageN
 	}
 
 	for version, files := range releases {
-		if h.shouldFilterRelease(packagePURL, files) {
-			h.proxy.Logger.Info("cooldown: filtering pypi version",
+		if h.proxy.versionDenied("pypi", packageName, version) || h.shouldFilterRelease(packagePURL, files) {
+			h.proxy.Logger.Info("policy: filtering pypi version",
 				"package", packageName, "version", version)
 			delete(releases, version)
 			continue
@@ -502,7 +521,10 @@ func (h *PyPIHandler) filterAndRewriteURLs(metadata map[string]any, packagePURL 
 		return
 	}
 
-	if h.shouldFilterRelease(packagePURL, urls) {
+	info, _ := metadata["info"].(map[string]any)
+	name, _ := info["name"].(string)
+	version, _ := info["version"].(string)
+	if h.proxy.versionDenied("pypi", name, version) || h.shouldFilterRelease(packagePURL, urls) {
 		metadata["urls"] = []any{}
 	}
 

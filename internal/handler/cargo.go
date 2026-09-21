@@ -124,12 +124,16 @@ type crateIndexEntry struct {
 }
 
 func (h *CargoHandler) applyCooldownFiltering(downstreamResponse http.ResponseWriter, body []byte) {
-	if h.proxy.Cooldown == nil || !h.proxy.Cooldown.Enabled() {
+	cooldownEnabled := h.proxy.Cooldown != nil && h.proxy.Cooldown.Enabled()
+	if !cooldownEnabled && h.proxy.Denylist == nil {
 		_, _ = downstreamResponse.Write(body)
 		return
 	}
 
 	scanner := bufio.NewScanner(strings.NewReader(string(body)))
+	// The response is already size-bounded by FetchOrCacheMetadata. Crate
+	// entries with many dependencies can exceed Scanner's default token limit.
+	scanner.Buffer(nil, len(body)+1)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -142,9 +146,12 @@ func (h *CargoHandler) applyCooldownFiltering(downstreamResponse http.ResponseWr
 			continue
 		}
 
+		if h.proxy.versionDenied("cargo", crate.Name, crate.Version) {
+			continue
+		}
 		publishedAt, err := time.Parse(time.RFC3339, crate.PublishTime)
 
-		if crate.PublishTime == "" || err != nil {
+		if !cooldownEnabled || crate.PublishTime == "" || err != nil {
 			_, _ = downstreamResponse.Write([]byte(line + "\n"))
 			continue
 		}
