@@ -425,7 +425,12 @@ func (s *Server) mountProtocolHandlers(r chi.Router, proxy *handler.Proxy) {
 	helmHandler := handler.NewHelmHandlerWithOCIRegistries(
 		proxy, s.cfg.BaseURL, s.cfg.Upstream.Helm, s.cfg.Upstream.OCIDefault, s.cfg.Upstream.OCI)
 	apkHandler := handler.NewAPKHandler(proxy, s.cfg.BaseURL, s.cfg.Upstream.APK)
-	debianHandler := handler.NewDebianHandler(proxy, s.cfg.BaseURL, s.cfg.Upstream.Debian)
+	debianHandler := handler.NewDebianHandler(
+		proxy,
+		s.cfg.BaseURL,
+		s.cfg.Upstream.Debian,
+		s.cfg.Upstream.DebianRepositories,
+	)
 	rpmHandler := handler.NewRPMHandlerWithUpstream(proxy, s.cfg.BaseURL, s.cfg.Upstream.RPM)
 	genericHandler := handler.NewGenericHandler(proxy, s.cfg.Upstream.Generic)
 
