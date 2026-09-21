@@ -3,10 +3,12 @@ package server
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -291,5 +293,113 @@ func defaultTestConfig(storagePath, dbPath string) *config.Config {
 			Path:   dbPath,
 		},
 		Log: config.LogConfig{Level: "info", Format: "text"},
+	}
+}
+
+// undeletableStorage is a backend whose Delete always fails, standing in for a
+// backend that refuses deletion: a permissions problem, or Windows while a
+// reader holds the file open.
+type undeletableStorage struct {
+	storage.Storage
+	deletes atomic.Int64
+}
+
+func (u *undeletableStorage) Delete(_ context.Context, _ string) error {
+	u.deletes.Add(1)
+	return errors.New("storage refused the delete")
+}
+
+// runEvictionWithDeadline fails the test if a pass does not return, rather than
+// hanging until the package timeout.
+func runEvictionWithDeadline(t *testing.T, ctx context.Context, db *database.DB, store storage.Storage, maxSize int64) {
+	t.Helper()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		evictLRU(ctx, db, store, logger, maxSize)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("evictLRU never returned: it is retrying records it cannot evict")
+	}
+}
+
+// TestEvictLRU_EndsPassWhenNothingCanBeEvicted is the loop that would otherwise
+// never end. Records that fail to delete stay eligible, so the same batch comes
+// back forever while the recorded size never drops.
+func TestEvictLRU_EndsPassWhenNothingCanBeEvicted(t *testing.T) {
+	db, store := setupEvictionTest(t)
+	ctx := context.Background()
+
+	now := time.Now()
+	seedArtifact(t, ctx, db, store, "old-pkg", 500, now.Add(-2*time.Hour))
+	seedArtifact(t, ctx, db, store, "new-pkg", 500, now)
+
+	undeletable := &undeletableStorage{Storage: store}
+	runEvictionWithDeadline(t, ctx, db, undeletable, 100)
+
+	// One attempt per record, then the pass ends. Both records survive for the
+	// next pass to retry.
+	if got := undeletable.deletes.Load(); got != 2 {
+		t.Errorf("delete attempts = %d, want 2: one per record in the single batch", got)
+	}
+	count, err := db.GetCachedArtifactCount()
+	if err != nil {
+		t.Fatalf("failed to get count: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("cached artifacts = %d, want 2: a failed delete must not clear the record", count)
+	}
+}
+
+// TestEvictLRU_StopsWhenContextCanceled covers shutdown: a canceled context can
+// make every delete fail instantly, which is the fastest way to spin.
+func TestEvictLRU_StopsWhenContextCanceled(t *testing.T) {
+	db, store := setupEvictionTest(t)
+	seedArtifact(t, context.Background(), db, store, "old-pkg", 500, time.Now())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	undeletable := &undeletableStorage{Storage: store}
+	runEvictionWithDeadline(t, ctx, db, undeletable, 100)
+
+	if got := undeletable.deletes.Load(); got != 0 {
+		t.Errorf("delete attempts = %d, want 0 once the context is canceled", got)
+	}
+}
+
+// TestEvictLRU_EvictsArtifactWithoutRecordedSize covers progress counted in
+// records rather than bytes: a record with no size frees nothing, but evicting
+// it is still progress and the pass must go on to the next record.
+func TestEvictLRU_EvictsArtifactWithoutRecordedSize(t *testing.T) {
+	db, store := setupEvictionTest(t)
+	ctx := context.Background()
+
+	now := time.Now()
+	seedArtifact(t, ctx, db, store, "sizeless-pkg", 500, now.Add(-2*time.Hour))
+	seedArtifact(t, ctx, db, store, "sized-pkg", 500, now)
+	clearRecordedSize(t, db, "pkg:npm/sizeless-pkg@1.0.0", "sizeless-pkg-1.0.0.tgz")
+
+	// The sizeless record is the oldest, so it is evicted first and frees
+	// nothing. Only evicting the second record gets under the limit.
+	runEvictionWithDeadline(t, ctx, db, store, 100)
+
+	count, err := db.GetCachedArtifactCount()
+	if err != nil {
+		t.Fatalf("failed to get count: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("cached artifacts = %d, want 0: the pass must continue past a record that frees nothing", count)
+	}
+}
+
+func clearRecordedSize(t *testing.T, db *database.DB, versionPURL, filename string) {
+	t.Helper()
+	query := db.Rebind(`UPDATE artifacts SET size = NULL WHERE version_purl = ? AND filename = ?`)
+	if _, err := db.Exec(query, versionPURL, filename); err != nil {
+		t.Fatalf("clearing recorded size: %v", err)
 	}
 }
