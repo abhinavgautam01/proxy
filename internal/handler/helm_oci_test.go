@@ -2,6 +2,8 @@ package handler
 
 import (
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -116,13 +118,25 @@ func TestHelmOCIReferenceRewriting(t *testing.T) {
 	}
 }
 
-func TestHelmIndexRejectsInvalidChartReferences(t *testing.T) {
+func TestHelmIndexOmitsMalformedChartReleases(t *testing.T) {
+	goodDigest := strings.Repeat("a", 64)
 	for _, reference := range []string{"oci:///chart", "oci://ghcr.io", "oci://user:secret@ghcr.io/chart", "oci://ghcr.io/../chart", "oci://ghcr.io/%2e%2e/chart", "oci://ghcr.io/chart?token=x", "file:///chart.tgz", "ftp://example.com/chart.tgz", "https://example.com/chart.zip"} {
 		t.Run(reference, func(t *testing.T) {
-			h := NewHelmHandler(&Proxy{}, "https://proxy.example", nil)
-			index := fmt.Sprintf("apiVersion: v1\nentries:\n  demo:\n    - digest: %s\n      urls: [%q]\n", strings.Repeat("a", 64), reference)
-			if _, err := h.rewriteIndex("mixed", "https://charts.example", []byte(index)); err == nil {
-				t.Fatal("invalid reference was accepted")
+			h := NewHelmHandler(&Proxy{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, "https://proxy.example", nil)
+			index := fmt.Sprintf("apiVersion: v1\nentries:\n  demo:\n    - digest: %s\n      urls: [%q]\n    - digest: %s\n      urls: [demo-1.0.0.tgz]\n", strings.Repeat("b", 64), reference, goodDigest)
+			rewritten, err := h.rewriteIndex("mixed", "https://charts.example", []byte(index))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(rewritten), reference) || strings.Contains(string(rewritten), strings.Repeat("b", 64)) {
+				t.Fatalf("malformed release not omitted: %s", rewritten)
+			}
+			if !strings.Contains(string(rewritten), h.chartProxyURL("mixed", goodDigest, "demo-1.0.0.tgz")) {
+				t.Fatalf("valid release missing from rewritten index: %s", rewritten)
+			}
+			download, err := h.findChartDownload("https://charts.example", []byte(index), goodDigest, "demo-1.0.0.tgz")
+			if err != nil || download != "https://charts.example/demo-1.0.0.tgz" {
+				t.Fatalf("chart lookup = %q, %v", download, err)
 			}
 		})
 	}

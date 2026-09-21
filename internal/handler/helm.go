@@ -190,7 +190,9 @@ func (h *HelmHandler) rewriteIndex(repository, upstreamURL string, body []byte) 
 		for _, release := range releases.Content {
 			chart, err := h.parseChartRelease(chartName, upstreamURL, release)
 			if err != nil {
-				return nil, err
+				h.proxy.Logger.Warn("omitting malformed Helm chart release",
+					"repository", repository, "chart", chartName, "error", err)
+				continue
 			}
 			if h.chartOnCooldown(chartName, chart.created) {
 				continue
@@ -225,7 +227,7 @@ func (h *HelmHandler) findChartDownload(upstreamURL string, body []byte, digest,
 		for _, release := range releases.Content {
 			chart, err := h.parseChartRelease(chartName, upstreamURL, release)
 			if err != nil {
-				return "", err
+				continue
 			}
 			if chart.digest != digest || h.chartOnCooldown(chartName, chart.created) {
 				continue
