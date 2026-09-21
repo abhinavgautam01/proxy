@@ -520,8 +520,9 @@ func runMirror() {
 	proxy := handler.NewProxy(db, store, fetcher, resolver, logger)
 	proxy.Denylist, err = denylist.New(cfg.Denylist.Packages)
 	if err != nil {
+		_ = db.Close()
 		fmt.Fprintf(os.Stderr, "invalid denylist: %v\n", err)
-		return
+		os.Exit(1) //nolint:gocritic // db closed above
 	}
 	proxy.CacheMetadata = true // mirror always caches metadata
 	proxy.MetadataTTL = cfg.ParseMetadataTTL()
