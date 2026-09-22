@@ -477,6 +477,56 @@ resolved package/version identity are not covered. This is an explicit operator
 policy, not automatic CVE detection or cache re-scanning. Exact pins or dependency
 constraints may still make an install fail when no allowed version can satisfy it.
 
+### APT version pinning
+
+For Debian and Ubuntu clients, combine the proxy's download denylist with
+client-side APT preferences. The proxy blocks recognized denied `.deb` downloads
+with 403, but does not remove versions from APT indexes. Without a client-side
+pin, APT can select a denied version and then fail when downloading it.
+
+On each client, add a record to `/etc/apt/preferences.d/proxy-denylist.pref`:
+
+```text
+Package: somepkg
+Pin: version 1.2.3-1
+Pin-Priority: -1
+```
+
+Replace `somepkg` with the binary package name and `1.2.3-1` with its full APT
+version, including the epoch if present. A negative priority excludes that
+version from normal candidate selection. For multi-architecture clients, use
+`Package: somepkg:any` to cover all architectures. Separate additional records
+with blank lines. See [apt_preferences(5)](https://manpages.debian.org/stable/apt/apt_preferences.5.en.html).
+
+Check the effective priorities and simulate installation before deploying the
+preferences broadly:
+
+```bash
+apt-cache policy somepkg
+apt-get --simulate install somepkg
+```
+
+Confirm that the denied version has priority `-1` and is not selected. Existing
+specific pins can take precedence, so check for conflicts. APT can select
+another candidate only if one is available and satisfies dependency constraints;
+a Debian suite commonly offers only one version. Pinning does not remove an
+already-installed package or automatically downgrade it.
+
+These preferences are managed on clients, not distributed by the proxy. Keep
+the corresponding proxy denylist entries as a separate download guard.
+
+APT indexes are left unchanged to preserve upstream authentication: `Release`
+metadata contains index checksums and is signed by the repository. Filtering
+would require regenerating metadata and signing it with a key clients trust,
+making the proxy a repository authority rather than a transparent cache. Do not
+disable signature verification to work around this limitation. See
+[apt-secure(8)](https://manpages.debian.org/stable/apt/apt-secure.8.en.html).
+
+If centrally curated APT indexes are required, use a repository manager such as
+[aptly](https://www.aptly.info/) or [reprepro](https://salsa.debian.org/debian/reprepro)
+as the upstream behind the proxy. Filtered APT repository generation and signing
+are outside the proxy's current scope.
+
 ## Artifact Scanning
 
 Cooldown only ever looks at a version's *publish timestamp* — it never inspects the actual bytes of an artifact. Artifact scanning runs after a fetched artifact is staged into storage but before it becomes visible from cache, so an external scanner (trivy, ClamAV, Wiz, or any custom service) can block a bad verdict from ever reaching a client.
