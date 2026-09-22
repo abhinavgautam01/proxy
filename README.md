@@ -513,6 +513,10 @@ deb http://localhost:8080/debian/security trixie-security main
 `upstream.debian` keeps serving `/debian/pool/…` and `/debian/dists/…`
 unchanged. See [Debian archives](docs/configuration.md#debian-archives).
 
+The version denylist blocks recognized `.deb` downloads but leaves signed APT
+indexes unchanged. To keep APT from selecting a denied version, configure
+[client-side version pinning](docs/configuration.md#apt-version-pinning).
+
 ### RPM / Yum / DNF
 
 Configure yum/dnf to use the proxy in `/etc/yum.repos.d/proxy.repo`:
