@@ -172,7 +172,7 @@ func TestDenylistDownloadRoutes(t *testing.T) {
 		{"npm", "/demo/-/demo-1.0.0.tgz", "demo-1.0.0.tgz", func(p *Proxy) http.Handler { return NewNPMHandler(p, "http://proxy.test", "").Routes() }},
 		{"pypi", "/packages/a/b/demo-1.0.0.tar.gz", "demo-1.0.0.tar.gz", func(p *Proxy) http.Handler { return NewPyPIHandler(p, "http://proxy.test").Routes() }},
 		{"cargo", "/crates/demo/1.0.0/download", "demo-1.0.0.crate", func(p *Proxy) http.Handler { return NewCargoHandler(p, "http://proxy.test", "", "").Routes() }},
-		{"deb", "/pool/main/d/demo/demo_1.0.0_amd64.deb", "demo_1.0.0_amd64.deb", func(p *Proxy) http.Handler { return NewDebianHandler(p, "http://proxy.test", "").Routes() }},
+		{"deb", "/pool/main/d/demo/demo_1.0.0_amd64.deb", "demo_1.0.0_amd64.deb", func(p *Proxy) http.Handler { return NewDebianHandler(p, "http://proxy.test", "", nil).Routes() }},
 	} {
 		t.Run(tc.ecosystem, func(t *testing.T) {
 			p, db, store, _ := setupTestProxy(t)

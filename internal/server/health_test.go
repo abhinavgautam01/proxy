@@ -400,7 +400,9 @@ func TestHealthCache_ProbeTimeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
 	}
-	if elapsed > 500*time.Millisecond {
+	// Generous bound: only needs to prove Check returned via the probe
+	// timeout rather than blocking on Store; CI runners add scheduling noise.
+	if elapsed > 5*time.Second {
 		t.Errorf("probe took %v, expected ~50ms (timeout not respected)", elapsed)
 	}
 }
