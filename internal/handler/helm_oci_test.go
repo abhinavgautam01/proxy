@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -137,6 +138,9 @@ func TestHelmIndexOmitsMalformedChartReleases(t *testing.T) {
 			download, err := h.findChartDownload("https://charts.example", []byte(index), goodDigest, "demo-1.0.0.tgz")
 			if err != nil || download != "https://charts.example/demo-1.0.0.tgz" {
 				t.Fatalf("chart lookup = %q, %v", download, err)
+			}
+			if _, err := h.findChartDownload("https://charts.example", []byte(index), strings.Repeat("b", 64), "demo-1.0.0.tgz"); !errors.Is(err, errHelmChartNotFound) {
+				t.Fatalf("omitted release lookup error = %v, want errHelmChartNotFound", err)
 			}
 		})
 	}
