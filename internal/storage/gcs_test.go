@@ -73,6 +73,9 @@ func TestOpenBucketGCSRoundTripWithEmulator(t *testing.T) {
 	if err != nil || exists {
 		t.Fatalf("Exists after delete = %v, %v; want false, nil", exists, err)
 	}
+	if err := store.Delete(ctx, "npm/pkg/file.tgz"); err != nil {
+		t.Fatalf("Delete missing object = %v, want nil", err)
+	}
 
 	reader, err := store.Open(ctx, "npm/pkg/file.tgz")
 	if reader != nil || !errors.Is(err, ErrNotFound) {
@@ -121,7 +124,12 @@ func (f *fakeGCSServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, fakeGCSObject{Name: name, Size: strconv.Itoa(len(data)), Updated: time.Now().UTC().Format(time.RFC3339Nano)})
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/storage/v1/b/test-bucket/o/"):
-		delete(f.objects, objectNameFromPath(r.URL.Path))
+		name := objectNameFromPath(r.URL.Path)
+		if _, ok := f.objects[name]; !ok {
+			http.NotFound(w, r)
+			return
+		}
+		delete(f.objects, name)
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		f.t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
