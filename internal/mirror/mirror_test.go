@@ -2,9 +2,9 @@ package mirror
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -124,6 +124,10 @@ func TestMirrorRunCanceled(t *testing.T) {
 
 func TestMirrorOneDirectServeCacheHit(t *testing.T) {
 	m := setupTestMirror(t, 1)
+	fetcher := fetch.NewFetcher(
+		fetch.WithHTTPClient(&http.Client{Transport: rejectingMirrorTransport{}}), fetch.WithMaxRetries(0))
+	t.Cleanup(func() { _ = fetcher.Close() })
+	m.proxy.Fetcher = fetcher
 	m.proxy.DirectServe = true
 	m.proxy.Storage = signedURLStorage{Storage: m.storage}
 
@@ -142,13 +146,18 @@ func TestMirrorOneDirectServeCacheHit(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertVersion() error = %v", err)
 	}
+	const storagePath = "npm/example/1.0.0/example-1.0.0.tgz"
+	size, hash, err := m.storage.Store(context.Background(), storagePath, strings.NewReader("tarball bytes"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := m.db.UpsertArtifact(&database.Artifact{
 		VersionPURL: versionPURL,
-		Filename:    "",
+		Filename:    "example-1.0.0.tgz",
 		UpstreamURL: "https://registry.example/artifact",
-		StoragePath: sql.NullString{String: "npm/example/1.0.0/artifact", Valid: true},
-		ContentHash: sql.NullString{String: strings.Repeat("a", sha256.Size*2), Valid: true},
-		Size:        sql.NullInt64{Int64: 1, Valid: true},
+		StoragePath: sql.NullString{String: storagePath, Valid: true},
+		ContentHash: sql.NullString{String: hash, Valid: true},
+		Size:        sql.NullInt64{Int64: size, Valid: true},
 		FetchedAt:   sql.NullTime{Time: time.Now(), Valid: true},
 	}); err != nil {
 		t.Fatalf("UpsertArtifact() error = %v", err)

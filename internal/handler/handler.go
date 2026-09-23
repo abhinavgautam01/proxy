@@ -225,6 +225,22 @@ func (p *Proxy) GetOrFetchArtifact(ctx context.Context, ecosystem, name, version
 	if err != nil {
 		return nil, err
 	}
+	// Deny before resolution as well as before reading the cache. Mirror callers
+	// do not supply a filename, and resolving it can contact an upstream registry.
+	if p.Denylist.Denied(versionPURL) {
+		return nil, fmt.Errorf("%w: %s", ErrVersionDenied, versionPURL)
+	}
+	var info *fetch.ArtifactInfo
+	if filename == "" {
+		info, err = p.resolveArtifact(ctx, ecosystem, name, version)
+		if err != nil {
+			return nil, err
+		}
+		filename = info.Filename
+		if filename == "" {
+			return nil, errors.New("resolved artifact has no filename")
+		}
+	}
 	if cached, err := p.checkCache(ctx, pkgPURL, versionPURL, filename); err != nil {
 		return nil, err
 	} else if cached != nil {
@@ -237,7 +253,7 @@ func (p *Proxy) GetOrFetchArtifact(ctx context.Context, ecosystem, name, version
 		return p.cachedArtifactRecord(pkgPURL, versionPURL, filename, "")
 	}
 	return p.coalesceFetch(ctx, key, recheck, func(fetchCtx context.Context) (artifacts.Artifact, string, error) {
-		return p.fetchAndCache(fetchCtx, ecosystem, name, version, filename, pkgPURL, versionPURL)
+		return p.fetchAndCache(fetchCtx, ecosystem, name, version, filename, pkgPURL, versionPURL, info)
 	})
 }
 
@@ -375,19 +391,26 @@ func (p *Proxy) rejectUnusableCacheRecord(artifact *database.CachedArtifact, ver
 	}
 }
 
-func (p *Proxy) fetchAndCache(ctx context.Context, ecosystem, name, version, filename, pkgPURL, versionPURL string) (artifacts.Artifact, string, error) {
-	// Resolve download URL
+func (p *Proxy) resolveArtifact(ctx context.Context, ecosystem, name, version string) (*fetch.ArtifactInfo, error) {
 	info, err := p.Resolver.Resolve(ctx, ecosystem, name, version)
 	if err != nil {
 		if errors.Is(err, fetch.ErrNotFound) {
-			return artifacts.Artifact{}, "", ErrUpstreamNotFound
+			return nil, ErrUpstreamNotFound
 		}
-		return artifacts.Artifact{}, "", fmt.Errorf("resolving download URL: %w", err)
+		return nil, fmt.Errorf("resolving download URL: %w", err)
 	}
+	return info, nil
+}
 
-	// Use resolved filename if provided filename is empty
-	if filename == "" {
-		filename = info.Filename
+func (p *Proxy) fetchAndCache(ctx context.Context, ecosystem, name, version, filename, pkgPURL, versionPURL string, info *fetch.ArtifactInfo) (artifacts.Artifact, string, error) {
+	// Reuse the resolution used for an unnamed cache lookup. Named requests
+	// still resolve only on a cache miss, inside the coalesced fetch.
+	if info == nil {
+		var err error
+		info, err = p.resolveArtifact(ctx, ecosystem, name, version)
+		if err != nil {
+			return artifacts.Artifact{}, "", err
+		}
 	}
 
 	p.Logger.Info("fetching from upstream",
