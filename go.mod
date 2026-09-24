@@ -14,7 +14,7 @@ require (
 	github.com/git-pkgs/enrichment v0.7.1
 	github.com/git-pkgs/gcs v0.1.0
 	github.com/git-pkgs/integrity v0.1.1
-	github.com/git-pkgs/magic v0.3.1
+	github.com/git-pkgs/magic v0.4.0
 	github.com/git-pkgs/purl v0.1.20
 	github.com/git-pkgs/registries v0.9.1
 	github.com/git-pkgs/spdx v0.3.2
