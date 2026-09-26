@@ -1166,8 +1166,8 @@ func (p *Proxy) ProxyCached(w http.ResponseWriter, r *http.Request, upstreamURL,
 // proxyCachedWithEncoding is ProxyCached with an explicit upstream Accept-Encoding.
 // "identity" preserves signed index bytes (the default); "gzip" keeps both hops
 // compressed for large, non-hash-pinned metadata whose clients decode gzip
-// (Homebrew API). The stored bytes and Content-Encoding are replayed verbatim
-// either way.
+// (Homebrew API and Conda repodata). The stored bytes and Content-Encoding are
+// replayed verbatim either way.
 func (p *Proxy) proxyCachedWithEncoding(w http.ResponseWriter, r *http.Request, upstreamURL, ecosystem, cacheKey, acceptEncoding string, acceptHeaders ...string) {
 	if !p.CacheMetadata {
 		// Stream directly without buffering when caching is off.

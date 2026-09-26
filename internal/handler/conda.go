@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -165,9 +166,21 @@ func (h *CondaHandler) handleRepodata(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := h.proxy.ReadMetadata(resp.Body)
+	// Explicitly requesting gzip disables the transport's automatic decoding.
+	// Cooldown needs JSON, so decode here and bound the decompressed size too.
+	var reader io.Reader = resp.Body
+	if strings.EqualFold(strings.TrimSpace(resp.Header.Get(headerContentEncoding)), "gzip") {
+		decoded, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			http.Error(w, "failed to decode response", http.StatusBadGateway)
+			return
+		}
+		defer func() { _ = decoded.Close() }()
+		reader = decoded
+	}
+	body, err := h.proxy.ReadMetadata(reader)
 	if err != nil {
-		http.Error(w, "failed to read response", http.StatusInternalServerError)
+		http.Error(w, "failed to read response", http.StatusBadGateway)
 		return
 	}
 
@@ -240,7 +253,14 @@ func (h *CondaHandler) applyCooldownFiltering(body []byte) ([]byte, error) {
 func (h *CondaHandler) proxyCached(w http.ResponseWriter, r *http.Request) {
 	cacheKey := strings.TrimPrefix(r.URL.Path, "/")
 	cacheKey = strings.ReplaceAll(cacheKey, "/", "_")
-	h.proxy.ProxyCached(w, r, h.upstreamURL+r.URL.Path, "conda", cacheKey, "*/*")
+	// Large JSON indexes can exceed the metadata limit uncompressed. Conda
+	// clients decode Content-Encoding, so cache and relay gzip verbatim. The
+	// already-compressed repodata.json.bz2 route must stay on identity.
+	acceptEncoding := "identity"
+	if strings.HasSuffix(r.URL.Path, ".json") {
+		acceptEncoding = "gzip"
+	}
+	h.proxy.proxyCachedWithEncoding(w, r, h.upstreamURL+r.URL.Path, "conda", cacheKey, acceptEncoding, "*/*")
 }
 
 // proxyUpstream forwards a request to Anaconda without caching.
