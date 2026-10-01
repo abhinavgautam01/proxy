@@ -123,6 +123,7 @@ func newTestServer(t *testing.T) *testServer {
 	r.Route("/ui", func(ui chi.Router) {
 		ui.Mount("/static", http.StripPrefix("/ui/static/", staticHandler()))
 		ui.Get("/", s.handleRoot)
+		ui.Get("/analytics", s.handleAnalytics)
 		ui.Get("/install", s.handleInstall)
 		ui.Get("/search", s.handleSearch)
 		ui.Get("/packages", s.handlePackagesList)

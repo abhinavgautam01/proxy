@@ -31,6 +31,7 @@
 // Web UI (HTML), mounted under /ui so reverse proxies can gate it
 // separately from the package endpoints:
 //   - /ui/                - Dashboard
+//   - /ui/analytics       - Download and cache analytics
 //   - /ui/install         - Client configuration guide
 //   - /ui/packages        - List all cached packages
 //   - /ui/search          - Search packages
@@ -113,6 +114,7 @@ type Server struct {
 	accessLog   *accesslog.Logger
 	ecr         *ecrTokens
 	breakers    *breakerMonitor
+	ecoStats    ecosystemStatsCache
 }
 
 // New creates a new Server with the given configuration.
@@ -304,6 +306,7 @@ func (s *Server) serve(listener net.Listener) error {
 	r.Route("/ui", func(ui chi.Router) {
 		ui.Mount("/static", http.StripPrefix("/ui/static/", staticHandler()))
 		ui.Get("/", s.handleRoot)
+		ui.Get("/analytics", s.handleAnalytics)
 		ui.Get("/install", s.handleInstall)
 		ui.Get("/search", s.handleSearch)
 		ui.Get("/packages", s.handlePackagesList)
@@ -515,7 +518,7 @@ func (s *Server) updateCacheStats() {
 	}
 	metrics.UpdateCacheStats(stats.TotalSize, stats.TotalArtifacts)
 
-	ecosystems, err := s.db.GetEcosystemStats()
+	ecosystems, err := s.ecoStats.Refresh(s.db)
 	if err != nil {
 		s.logger.Warn("failed to get ecosystem stats for metrics", "error", err)
 		return
@@ -633,16 +636,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 			TotalPackages:   stats.TotalPackages,
 			TotalVersions:   stats.TotalVersions,
 		},
-		EnrichmentStats: EnrichmentStatsView{
-			EnrichedPackages:     enrichStats.EnrichedPackages,
-			VulnSyncedPackages:   enrichStats.VulnSyncedPackages,
-			TotalVulnerabilities: enrichStats.TotalVulnerabilities,
-			CriticalVulns:        enrichStats.CriticalVulns,
-			HighVulns:            enrichStats.HighVulns,
-			MediumVulns:          enrichStats.MediumVulns,
-			LowVulns:             enrichStats.LowVulns,
-			HasVulns:             enrichStats.TotalVulnerabilities > 0,
-		},
+		EnrichmentStats: enrichmentStatsView(enrichStats),
 	}
 
 	for _, p := range popular {
@@ -1236,10 +1230,18 @@ func categorizeLicense(license sql.NullString) string {
 	return categorizeLicenseCSS(license.String)
 }
 
-// responseWriter wraps http.ResponseWriter to capture status code.
+// responseWriter wraps http.ResponseWriter to capture the status code and the
+// number of body bytes written, which is what a client actually downloaded.
 type responseWriter struct {
 	http.ResponseWriter
 	status int
+	bytes  int64
+}
+
+func (rw *responseWriter) Write(b []byte) (int, error) {
+	n, err := rw.ResponseWriter.Write(b)
+	rw.bytes += int64(n)
+	return n, err
 }
 
 // Unwrap lets ResponseController reach capabilities such as flushing when a
