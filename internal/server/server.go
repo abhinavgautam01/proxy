@@ -514,6 +514,31 @@ func (s *Server) updateCacheStats() {
 		return
 	}
 	metrics.UpdateCacheStats(stats.TotalSize, stats.TotalArtifacts)
+
+	ecosystems, err := s.db.GetEcosystemStats()
+	if err != nil {
+		s.logger.Warn("failed to get ecosystem stats for metrics", "error", err)
+		return
+	}
+	metrics.UpdateEcosystemStats(ecosystemMetrics(ecosystems))
+}
+
+// ecosystemMetrics converts database rows into the metrics package's own
+// snapshot type, so that package keeps no dependency on the database schema.
+func ecosystemMetrics(stats []database.EcosystemStats) []metrics.EcosystemStats {
+	out := make([]metrics.EcosystemStats, 0, len(stats))
+	for _, e := range stats {
+		out = append(out, metrics.EcosystemStats{
+			Ecosystem:       e.Ecosystem,
+			Packages:        e.Packages,
+			Versions:        e.Versions,
+			Artifacts:       e.Artifacts,
+			CacheSize:       e.CacheSize,
+			Downloads:       e.Downloads,
+			DownloadedBytes: e.DownloadedBytes,
+		})
+	}
+	return out
 }
 
 // Shutdown gracefully shuts down the server.

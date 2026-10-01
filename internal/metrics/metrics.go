@@ -4,6 +4,7 @@ package metrics
 import (
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/git-pkgs/purl"
@@ -138,6 +139,57 @@ var (
 		[]string{"step"},
 	)
 
+	// Per-ecosystem gauges, derived from the database rather than incremented
+	// in the request path, and refreshed on the same tick as the cache gauges
+	// above.
+	EcosystemDownloadedBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proxy_ecosystem_downloaded_bytes",
+			Help: "Accumulated bytes served from cache per ecosystem (cache hits x artifact size)",
+		},
+		[]string{"ecosystem"},
+	)
+
+	EcosystemDownloads = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proxy_ecosystem_artifact_downloads",
+			Help: "Accumulated artifact downloads served from cache per ecosystem",
+		},
+		[]string{"ecosystem"},
+	)
+
+	EcosystemCacheSize = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proxy_ecosystem_cache_size_bytes",
+			Help: "Size of cached artifacts per ecosystem in bytes",
+		},
+		[]string{"ecosystem"},
+	)
+
+	EcosystemCachedArtifacts = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proxy_ecosystem_cached_artifacts",
+			Help: "Number of cached artifacts per ecosystem",
+		},
+		[]string{"ecosystem"},
+	)
+
+	EcosystemPackages = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proxy_ecosystem_packages",
+			Help: "Number of known packages per ecosystem",
+		},
+		[]string{"ecosystem"},
+	)
+
+	EcosystemVersions = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proxy_ecosystem_versions",
+			Help: "Number of known package versions per ecosystem",
+		},
+		[]string{"ecosystem"},
+	)
+
 	// Scanning metrics
 	ScanDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -183,6 +235,12 @@ func init() {
 		ActiveRequests,
 		IntegrityFailures,
 		HealthProbeFailures,
+		EcosystemDownloadedBytes,
+		EcosystemDownloads,
+		EcosystemCacheSize,
+		EcosystemCachedArtifacts,
+		EcosystemPackages,
+		EcosystemVersions,
 		ScanDuration,
 		ScanBlocked,
 		ScanErrors,
@@ -261,6 +319,79 @@ func RecordScanError(ecosystem, scannerName, errorType string) {
 func UpdateCacheStats(sizeBytes, artifactCount int64) {
 	CacheSize.Set(float64(sizeBytes))
 	CachedArtifacts.Set(float64(artifactCount))
+}
+
+// EcosystemStats is one ecosystem's row of the snapshot published as gauges.
+type EcosystemStats struct {
+	Ecosystem       string
+	Packages        int64
+	Versions        int64
+	Artifacts       int64
+	CacheSize       int64
+	Downloads       int64
+	DownloadedBytes int64
+}
+
+// publishedEcosystems tracks which labels the per-ecosystem gauges currently
+// carry, so a label that disappears can be deleted individually.
+var (
+	publishedMu         sync.Mutex
+	publishedEcosystems = map[string]bool{}
+)
+
+// UpdateEcosystemStats republishes the per-ecosystem gauges from a fresh snapshot.
+//
+// Rows are summed by label before anything is published, because normalizing
+// collapses aliases: a database holding both "gem" and "rubygems" rows -- the
+// proxy writes the former, git-pkgs the latter -- arrives as two rows belonging
+// to one label, and publishing them one at a time would leave only the last.
+//
+// The vectors are not Reset() first. Reset followed by a repopulating loop
+// leaves a window in which a scrape sees the families empty or half filled,
+// which renders as a spurious gap on any panel built from them. Each series is
+// Set instead, and only labels that have actually disappeared are deleted.
+func UpdateEcosystemStats(stats []EcosystemStats) {
+	totals := make(map[string]EcosystemStats, len(stats))
+	for _, s := range stats {
+		ecosystem := purl.NormalizeEcosystem(s.Ecosystem)
+		t := totals[ecosystem]
+		t.Packages += s.Packages
+		t.Versions += s.Versions
+		t.Artifacts += s.Artifacts
+		t.CacheSize += s.CacheSize
+		t.Downloads += s.Downloads
+		t.DownloadedBytes += s.DownloadedBytes
+		totals[ecosystem] = t
+	}
+
+	for ecosystem, t := range totals {
+		EcosystemDownloadedBytes.WithLabelValues(ecosystem).Set(float64(t.DownloadedBytes))
+		EcosystemDownloads.WithLabelValues(ecosystem).Set(float64(t.Downloads))
+		EcosystemCacheSize.WithLabelValues(ecosystem).Set(float64(t.CacheSize))
+		EcosystemCachedArtifacts.WithLabelValues(ecosystem).Set(float64(t.Artifacts))
+		EcosystemPackages.WithLabelValues(ecosystem).Set(float64(t.Packages))
+		EcosystemVersions.WithLabelValues(ecosystem).Set(float64(t.Versions))
+	}
+
+	publishedMu.Lock()
+	defer publishedMu.Unlock()
+
+	for ecosystem := range publishedEcosystems {
+		if _, still := totals[ecosystem]; still {
+			continue
+		}
+		EcosystemDownloadedBytes.DeleteLabelValues(ecosystem)
+		EcosystemDownloads.DeleteLabelValues(ecosystem)
+		EcosystemCacheSize.DeleteLabelValues(ecosystem)
+		EcosystemCachedArtifacts.DeleteLabelValues(ecosystem)
+		EcosystemPackages.DeleteLabelValues(ecosystem)
+		EcosystemVersions.DeleteLabelValues(ecosystem)
+	}
+
+	publishedEcosystems = make(map[string]bool, len(totals))
+	for ecosystem := range totals {
+		publishedEcosystems[ecosystem] = true
+	}
 }
 
 // UpdateCircuitBreakerState updates circuit breaker state gauge.
