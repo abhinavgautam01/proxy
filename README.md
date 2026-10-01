@@ -1196,6 +1196,12 @@ The same figures are available as JSON from `GET /stats`, which reports `downloa
 
 **From the handler's own name.** `proxy_upstream_fetch_duration_seconds` and `proxy_upstream_errors_total`, which report `composer`, `gem` and `go` where the other two sets report `packagist`, `rubygems` and `golang`. These are published series and are deliberately left as they are; renaming them would break existing queries and alerts.
 
+### Grafana dashboard
+
+A ready-made dashboard lives at [`deploy/grafana/git-pkgs-proxy.json`](deploy/grafana/git-pkgs-proxy.json). Import it via **Dashboards -> New -> Import** and pick your Prometheus data source when prompted; it has no hardcoded data source UID.
+
+It carries three ecosystem filters rather than one, because `ecosystem` means three different things across `/metrics` -- see the label sets above. **Ecosystem** filters the database-derived gauges, **Route** the request-path counters, and **Upstream** the two upstream fetch metrics. All three are query variables, so they populate from whatever labels your proxy is actually reporting; a panel is on the one its metric belongs to, and the panel descriptions say which.
+
 ### Health Check
 
 `/health` returns a structured JSON report of subsystem health. HTTP 200 if all checks pass; 503 if any fail.
