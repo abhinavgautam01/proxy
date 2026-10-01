@@ -10,6 +10,10 @@ import (
 	"github.com/git-pkgs/proxy/internal/metrics"
 )
 
+// analyticsTopSources caps how many callers the page lists; the rest are
+// summarised in the overflow row, and the access log has every one of them.
+const analyticsTopSources = 15
+
 // AnalyticsData contains data for rendering the analytics dashboard.
 type AnalyticsData struct {
 	Layout
@@ -168,6 +172,12 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("failed to gather runtime metrics", "error", err)
 	} else {
 		data.Runtime = runtimeView(snap)
+		if s.cfg != nil && s.cfg.UIRequestSources {
+			data.Runtime.SourcesOn = true
+			data.Runtime.Sources = s.sources.Top(analyticsTopSources)
+			data.Runtime.SourceCount = s.sources.Count()
+			data.Runtime.TrustsForward = s.trustsForwardedFor()
+		}
 	}
 
 	if err := s.templates.Render(w, "analytics", data); err != nil {

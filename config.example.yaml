@@ -20,6 +20,23 @@ base_url: "http://localhost:8080"
 # build machines hit a Docker network alias for the package endpoints.
 # ui_base_url: "https://proxy.example.com/ui"
 
+# Attribute requests to the leftmost X-Forwarded-For entry rather than the TCP
+# peer address, in the structured log, the access log and the request-source
+# table on /ui/analytics.
+#
+# Enable this only when the proxy sits behind a load balancer or ingress that
+# sets the header. Any client can send it: behind one it is the only way to see
+# past the hop, in front of one it lets a caller forge its own address.
+# trust_forwarded_for: false
+
+# Show the request-source table on /ui/analytics: caller addresses, the tool
+# each ran and how much each pulled.
+#
+# Off by default. The proxy has no authentication of its own, so leave this off
+# unless /ui is gated by a reverse proxy; anyone who can reach the page can
+# otherwise read the addresses of your build fleet.
+# ui_request_sources: false
+
 # Artifact storage configuration
 storage:
   # Storage backend URL

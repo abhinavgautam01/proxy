@@ -42,6 +42,20 @@ type RuntimeView struct {
 	ScanningOn   bool
 
 	ResponseBytes string
+	Clients       []ClientRow
+	Sources       []SourceRow
+	SourceCount   int
+	TrustsForward bool
+	// SourcesOn gates the caller table. The page is unauthenticated, so the
+	// addresses behind it are published only when asked for.
+	SourcesOn bool
+}
+
+// ClientRow is one client tool's share of requests and bytes.
+type ClientRow struct {
+	Client   string
+	Requests string
+	Bytes    string
 }
 
 // LabelledCount is a single counter series rendered as a row.
@@ -108,8 +122,50 @@ func runtimeView(snap *metrics.Snapshot) RuntimeView {
 	v.ScanningOn = len(v.Scans) > 0 || len(v.ScansBlocked) > 0 || len(v.ScanErrors) > 0
 
 	v.ResponseBytes = formatSize(int64(snap.Sum("proxy_response_bytes_total")))
+	v.Clients = clientRows(snap)
 
 	return v
+}
+
+// clientRows pairs each client tool's request count with the bytes it pulled,
+// busiest first. Both come from the same closed label set, so the two counters
+// line up row for row.
+func clientRows(snap *metrics.Snapshot) []ClientRow {
+	bytesByClient := snap.SumBy("proxy_client_response_bytes_total", "client")
+
+	type entry struct {
+		client   string
+		requests float64
+		bytes    float64
+	}
+
+	entries := make([]entry, 0)
+	for _, s := range snap.Samples("proxy_client_requests_total") {
+		client := s.Label("client")
+		entries = append(entries, entry{
+			client:   client,
+			requests: s.Value,
+			bytes:    bytesByClient[client],
+		})
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		a, b := entries[i], entries[j]
+		if a.bytes != b.bytes {
+			return a.bytes > b.bytes
+		}
+		return a.requests > b.requests
+	})
+
+	rows := make([]ClientRow, 0, len(entries))
+	for _, e := range entries {
+		rows = append(rows, ClientRow{
+			Client:   e.client,
+			Requests: formatCount(int64(e.requests)),
+			Bytes:    formatSize(int64(e.bytes)),
+		})
+	}
+	return rows
 }
 
 // statusClasses groups proxy_requests_total into 2xx/3xx/4xx/5xx buckets, which

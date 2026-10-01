@@ -19,6 +19,8 @@ See `config.example.yaml` in the repository root for a complete example.
 | `listen` | `PROXY_LISTEN` | `-listen` | `:8080` | Address to listen on |
 | `base_url` | `PROXY_BASE_URL` | `-base-url` | `http://localhost:8080` | Public URL package managers use to reach this proxy |
 | `ui_base_url` | `PROXY_UI_URL` | - | (defaults to `base_url`) | Public URL where the web UI is reached. Set separately when the UI lives behind a different hostname than package endpoints (e.g. public domain vs Docker network alias). Used for canonical/og:url tags and the install guide banner. The proxy still serves package endpoints on the same listener, so any reverse proxy fronting the UI publicly should restrict the public route to `PathPrefix(/ui)` to avoid exposing package endpoints. |
+| `trust_forwarded_for` | `PROXY_TRUST_FORWARDED_FOR` | - | `false` | Attribute requests to the leftmost `X-Forwarded-For` entry instead of the TCP peer address, in the structured log, the access log and the request-source table on `/ui/analytics`. |
+| `ui_request_sources` | `PROXY_UI_REQUEST_SOURCES` | - | `false` | Show the request-source table on `/ui/analytics`, which reports caller addresses, the tool each ran and how much each pulled. |
 
 ## Storage
 
@@ -122,6 +124,10 @@ access_log:
 | Config | Environment | Flag | Description |
 |--------|-------------|------|-------------|
 | `access_log.path` | `PROXY_ACCESS_LOG_PATH` | `-access-log` | File to append JSONL records to; empty disables the log |
+
+Each client request record carries `remote_addr` (the TCP peer, host and port), `remote_ip` (the address the request is attributed to), `user_agent`, `client` (the tool name derived from the User-Agent), `ecosystem`, and `bytes` (the response body size written to the client). The structured log carries the same `client`, `remote` and `remote_ip` fields.
+
+`remote_ip` follows the top-level `trust_forwarded_for` setting. Enable that only when the proxy sits behind a load balancer or ingress that sets the header: any client can send `X-Forwarded-For`, so behind such a hop it is the only way to see the real caller, but in front of one it lets a caller choose what address it is logged as. It can also choose a fresh one per request, which fills the bounded source table on `/ui/analytics` and evicts the genuine callers from it. `remote_addr` is unaffected and always records the TCP peer.
 
 The parent directory must exist and be writable when the proxy starts. A newly created log file is readable and writable only by the proxy process owner.
 

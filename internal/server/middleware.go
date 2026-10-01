@@ -49,6 +49,10 @@ func (s *Server) LoggerMiddleware(next http.Handler) http.Handler {
 		// the log, the metrics and the access log entirely.
 		defer func() {
 			duration := time.Since(start)
+			userAgent := r.UserAgent()
+			client := clientName(userAgent)
+			addr := clientAddr(r, s.trustsForwardedFor())
+			ecosystem := requestEcosystem(r.URL.Path)
 
 			s.logger.Info("request",
 				"request_id", requestID,
@@ -57,14 +61,16 @@ func (s *Server) LoggerMiddleware(next http.Handler) http.Handler {
 				"status", rw.status,
 				"duration", duration,
 				"bytes", rw.bytes,
-				"remote", r.RemoteAddr)
+				"client", client,
+				"remote", r.RemoteAddr,
+				"remote_ip", addr)
 
 			// Scrapes of /metrics would otherwise attribute themselves,
 			// burying real callers under whatever polls the proxy most often.
 			if r.URL.Path != "/metrics" {
-				ecosystem := requestEcosystem(r.URL.Path)
 				metrics.RecordRequest(ecosystem, rw.status, duration)
-				metrics.RecordResponse(ecosystem, rw.bytes)
+				metrics.RecordResponse(ecosystem, client, rw.bytes)
+				s.sources.Record(addr, client, rw.bytes)
 			}
 
 			if s.accessLog != nil {
@@ -76,6 +82,11 @@ func (s *Server) LoggerMiddleware(next http.Handler) http.Handler {
 					StatusCode: rw.status,
 					DurationMS: duration.Milliseconds(),
 					RemoteAddr: r.RemoteAddr,
+					RemoteIP:   addr,
+					UserAgent:  userAgent,
+					Client:     client,
+					Ecosystem:  ecosystem,
+					Bytes:      rw.bytes,
 				}); err != nil {
 					s.logger.Error("failed to write access log", "error", err)
 				}

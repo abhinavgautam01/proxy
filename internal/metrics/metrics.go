@@ -198,6 +198,22 @@ var (
 		[]string{"ecosystem"},
 	)
 
+	ClientRequests = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "proxy_client_requests_total",
+			Help: "Total requests by client tool, as identified from the User-Agent",
+		},
+		[]string{"client"},
+	)
+
+	ClientResponseBytes = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "proxy_client_response_bytes_total",
+			Help: "Total response body bytes written to clients, by client tool",
+		},
+		[]string{"client"},
+	)
+
 	// Scanning metrics
 	ScanDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -250,6 +266,8 @@ func init() {
 		EcosystemPackages,
 		EcosystemVersions,
 		ResponseBytes,
+		ClientRequests,
+		ClientResponseBytes,
 		ScanDuration,
 		ScanBlocked,
 		ScanErrors,
@@ -274,11 +292,16 @@ func RecordRequest(ecosystem string, status int, duration time.Duration) {
 // the database and counts cache hits multiplied by artifact size, while this
 // counts body bytes as they are written, including metadata responses and
 // cache misses.
-func RecordResponse(ecosystem string, bytes int64) {
+//
+// client must come from a closed set -- a User-Agent is attacker-controlled, so
+// passing it through raw would mint a time series per request.
+func RecordResponse(ecosystem, client string, bytes int64) {
+	ClientRequests.WithLabelValues(client).Inc()
 	if bytes <= 0 {
 		return
 	}
 	ResponseBytes.WithLabelValues(ecosystem).Add(float64(bytes))
+	ClientResponseBytes.WithLabelValues(client).Add(float64(bytes))
 }
 
 // RecordCacheHit increments cache hit counter.

@@ -98,6 +98,23 @@ type Config struct {
 	// Example: "https://proxy.example.com/ui"
 	UIBaseURL string `json:"ui_base_url" yaml:"ui_base_url"`
 
+	// TrustForwardedFor attributes requests to the leftmost X-Forwarded-For
+	// entry instead of the TCP peer address, in the structured log, the access
+	// log and the request-source table on /ui/analytics.
+	//
+	// Enable this only when the proxy sits behind a load balancer or ingress
+	// that sets the header, because any client can send it: behind one it is
+	// the only way to see past the hop, in front of one it lets a caller choose
+	// what address it is attributed to.
+	TrustForwardedFor bool `json:"trust_forwarded_for" yaml:"trust_forwarded_for"`
+
+	// UIRequestSources shows the request-source table on /ui/analytics, which
+	// reports caller addresses, the tool each ran and how much each pulled.
+	//
+	// Off by default. The proxy has no authentication of its own, so until this
+	// is enabled /ui exposes what is cached rather than who called.
+	UIRequestSources bool `json:"ui_request_sources" yaml:"ui_request_sources"`
+
 	// Storage configures artifact storage.
 	Storage StorageConfig `json:"storage" yaml:"storage"`
 
@@ -881,12 +898,16 @@ func setEnvStringSlice(dst *[]string, key string) {
 //   - PROXY_LOG_LEVEL
 //   - PROXY_LOG_FORMAT
 //   - PROXY_ACCESS_LOG_PATH
+//   - PROXY_TRUST_FORWARDED_FOR
+//   - PROXY_UI_REQUEST_SOURCES
 //   - PROXY_UPSTREAM_SWIFT
 //   - PROXY_HEALTH_STORAGE_PROBE_INTERVAL
 func (c *Config) LoadFromEnv() {
 	setEnvString(&c.Listen, "PROXY_LISTEN")
 	setEnvString(&c.BaseURL, "PROXY_BASE_URL")
 	setEnvString(&c.UIBaseURL, "PROXY_UI_URL")
+	setEnvBool(&c.TrustForwardedFor, "PROXY_TRUST_FORWARDED_FOR")
+	setEnvBool(&c.UIRequestSources, "PROXY_UI_REQUEST_SOURCES")
 	setEnvString(&c.Storage.URL, "PROXY_STORAGE_URL")
 	setEnvString(&c.Storage.Path, "PROXY_STORAGE_PATH")
 	setEnvString(&c.Storage.MaxSize, "PROXY_STORAGE_MAX_SIZE")

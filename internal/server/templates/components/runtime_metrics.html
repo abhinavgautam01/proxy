@@ -91,6 +91,70 @@
             </div>
         </div>
 
+        <!-- Who is calling. Addresses are never metric labels: the caller set is
+             unbounded, so per-address detail lives here and in the access log. -->
+        {{if .SourcesOn}}
+        <div class="border-t border-gray-200 dark:border-gray-800 pt-6">
+            <div class="flex flex-wrap items-baseline justify-between gap-2 mb-4">
+                <h3 class="text-sm font-semibold">Request sources</h3>
+                <p class="text-xs text-gray-500 dark:text-gray-400">
+                    {{if .TrustsForward}}Attributed by X-Forwarded-For{{else}}Attributed by peer address{{end}}
+                    {{- if .SourceCount}} · {{.SourceCount}} tracked{{end}}
+                </p>
+            </div>
+
+            <div class="grid lg:grid-cols-3 gap-8">
+                <div class="lg:col-span-2 overflow-x-auto">
+                    {{if .Sources}}
+                    <table class="w-full text-sm">
+                        <thead class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
+                            <tr>
+                                <th scope="col" class="text-left font-medium pb-2">Address</th>
+                                <th scope="col" class="text-left font-medium pb-2">Client</th>
+                                <th scope="col" class="text-right font-medium pb-2">Requests</th>
+                                <th scope="col" class="text-right font-medium pb-2">Downloaded</th>
+                                <th scope="col" class="text-right font-medium pb-2">Last seen</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-200 dark:divide-gray-800">
+                            {{range .Sources}}
+                            <tr class="{{if .IsOverflow}}text-gray-500 dark:text-gray-400 italic{{end}}">
+                                <th scope="row" class="py-2 text-left font-normal font-mono text-xs">{{.Addr}}</th>
+                                <td class="py-2 text-left text-gray-500 dark:text-gray-400">{{.Client}}</td>
+                                <td class="py-2 text-right tabular-nums">{{.Requests}}</td>
+                                <td class="py-2 text-right tabular-nums font-medium">{{.Bytes}}</td>
+                                <td class="py-2 text-right tabular-nums text-gray-500 dark:text-gray-400">{{.LastSeen}}</td>
+                            </tr>
+                            {{end}}
+                        </tbody>
+                    </table>
+                    {{else}}
+                    <p class="text-sm text-gray-500 dark:text-gray-400">No requests recorded yet.</p>
+                    {{end}}
+                </div>
+
+                <div>
+                    <h4 class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-3">By client</h4>
+                    {{if .Clients}}
+                    <table class="w-full text-sm">
+                        <tbody>
+                            {{range .Clients}}
+                            <tr>
+                                <th scope="row" class="py-1 text-left font-normal text-gray-500 dark:text-gray-400">{{.Client}}</th>
+                                <td class="py-1 text-right tabular-nums">{{.Requests}}</td>
+                                <td class="py-1 text-right tabular-nums font-medium">{{.Bytes}}</td>
+                            </tr>
+                            {{end}}
+                        </tbody>
+                    </table>
+                    {{else}}
+                    <p class="text-sm text-gray-500 dark:text-gray-400">None yet.</p>
+                    {{end}}
+                </div>
+            </div>
+        </div>
+        {{end}}
+
         {{if .ScanningOn}}
         <div class="border-t border-gray-200 dark:border-gray-800 pt-6">
             <h3 class="text-sm font-semibold mb-4">Pre-cache scanning</h3>
