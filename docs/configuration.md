@@ -97,6 +97,21 @@ database:
 |--------|-------------|------|-------------|
 | `database.url` | `PROXY_DATABASE_URL` | `-database-url` | PostgreSQL connection URL |
 
+### Hit counts
+
+Every cache hit updates the artifact's hit count and last-access time, which the stats pages and LRU eviction use. Rather than writing each hit as its own transaction, the proxy counts hits in memory and writes them together every `hit_flush_interval`. SQLite allows one writer at a time, and the proxy uses a single SQLite connection, so with a write per hit, concurrent downloads queue behind each other.
+
+```yaml
+database:
+  hit_flush_interval: "1s"
+```
+
+| Config | Environment | Flag | Description |
+|--------|-------------|------|-------------|
+| `database.hit_flush_interval` | `PROXY_DATABASE_HIT_FLUSH_INTERVAL` | - | How often batched hits are written (default `1s`). `0` writes each hit as it happens. |
+
+Hits not yet written are lost if the process is killed; a normal shutdown writes them.
+
 ## Logging
 
 ```yaml

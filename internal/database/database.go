@@ -36,6 +36,7 @@ type DB struct {
 	*sqlx.DB
 	dialect Dialect
 	path    string
+	hits    *hitBatch
 }
 
 func (db *DB) Dialect() Dialect {

@@ -151,6 +151,7 @@ func New(cfg *config.Config, logger *slog.Logger, buildInfo BuildInfo) (*Server,
 		_ = db.Close()
 		return nil, fmt.Errorf("migrating database schema: %w", err)
 	}
+	db.BatchHits(cfg.ParseHitFlushInterval(), logger)
 
 	// Initialize storage
 	storageURL := cfg.Storage.URL
