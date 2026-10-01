@@ -104,9 +104,13 @@ func (db *DB) writeHits(pending map[hitKey]hitEntry) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Timestamps only move forward: with proxies sharing a database, an older
+	// batch can flush after a newer hit is already written.
 	stmt, err := tx.Preparex(db.Rebind(`
 		UPDATE artifacts
-		SET hit_count = hit_count + ?, last_accessed_at = ?, updated_at = ?
+		SET hit_count = hit_count + ?,
+		    last_accessed_at = CASE WHEN last_accessed_at IS NULL OR last_accessed_at < ? THEN ? ELSE last_accessed_at END,
+		    updated_at = CASE WHEN updated_at IS NULL OR updated_at < ? THEN ? ELSE updated_at END
 		WHERE version_purl = ? AND filename = ?
 	`))
 	if err != nil {
@@ -125,7 +129,7 @@ func (db *DB) writeHits(pending map[hitKey]hitEntry) error {
 	})
 	for _, k := range keys {
 		e := pending[k]
-		if _, err := stmt.Exec(e.count, e.last, e.last, k.versionPURL, k.filename); err != nil {
+		if _, err := stmt.Exec(e.count, e.last, e.last, e.last, e.last, k.versionPURL, k.filename); err != nil {
 			return err
 		}
 	}

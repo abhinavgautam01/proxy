@@ -96,6 +96,55 @@ func TestBatchHitsWritesOnClose(t *testing.T) {
 	}
 }
 
+// TestBatchHitsKeepNewerAccessTime flushes a batch older than a hit already
+// written, as when proxies share a database. The count still adds up, but
+// neither timestamp may move backwards.
+func TestBatchHitsKeepNewerAccessTime(t *testing.T) {
+	runWithBothDatabases(t, func(t *testing.T, db *DB) {
+		versionPURL, filename := seedHitTestArtifact(t, db)
+		k := hitKey{versionPURL, filename}
+		now := time.Now()
+		read := func() *Artifact {
+			t.Helper()
+			a, err := db.GetArtifact(versionPURL, filename)
+			if err != nil || a == nil {
+				t.Fatalf("GetArtifact failed: %v", err)
+			}
+			return a
+		}
+		write := func(last time.Time) {
+			t.Helper()
+			if err := db.writeHits(map[hitKey]hitEntry{k: {count: 1, last: last}}); err != nil {
+				t.Fatalf("writeHits failed: %v", err)
+			}
+		}
+
+		write(now)
+		newer := read()
+		if !newer.LastAccessedAt.Valid {
+			t.Fatal("last_accessed_at not set from NULL")
+		}
+
+		write(now.Add(-time.Minute))
+		got := read()
+		if got.HitCount != 2 {
+			t.Errorf("hit count = %d, want 2", got.HitCount)
+		}
+		if !got.LastAccessedAt.Time.Equal(newer.LastAccessedAt.Time) {
+			t.Errorf("last_accessed_at moved from %v to %v", newer.LastAccessedAt.Time, got.LastAccessedAt.Time)
+		}
+		if !got.UpdatedAt.Equal(newer.UpdatedAt) {
+			t.Errorf("updated_at moved from %v to %v", newer.UpdatedAt, got.UpdatedAt)
+		}
+
+		write(now.Add(time.Minute))
+		got = read()
+		if !got.LastAccessedAt.Time.After(newer.LastAccessedAt.Time) || !got.UpdatedAt.After(newer.UpdatedAt) {
+			t.Error("a newer batch did not advance the timestamps")
+		}
+	})
+}
+
 func TestBatchHitsZeroIntervalWritesImmediately(t *testing.T) {
 	runWithBothDatabases(t, func(t *testing.T, db *DB) {
 		versionPURL, filename := seedHitTestArtifact(t, db)
