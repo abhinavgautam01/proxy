@@ -1123,6 +1123,28 @@ type StatsResponse struct {
 	TotalSizeHuman  string `json:"total_size"`
 	StorageURL      string `json:"storage_url"`
 	DatabasePath    string `json:"database_path"`
+	// DownloadedBytes is the accumulated download volume across every
+	// ecosystem: cache hits multiplied by the artifact size they served.
+	DownloadedBytes      int64                 `json:"downloaded_bytes"`
+	DownloadedBytesHuman string                `json:"downloaded"`
+	Downloads            int64                 `json:"downloads"`
+	Ecosystems           []EcosystemStatsEntry `json:"ecosystems"`
+	// StatsUnavailable distinguishes a proxy that has served nothing from one
+	// whose aggregation failed with no snapshot to fall back on. Without it
+	// both report zeros and an empty array.
+	StatsUnavailable bool `json:"stats_unavailable,omitempty"`
+}
+
+// EcosystemStatsEntry is one ecosystem's slice of the cache statistics.
+type EcosystemStatsEntry struct {
+	Ecosystem       string `json:"ecosystem"`
+	DownloadedBytes int64  `json:"downloaded_bytes"`
+	Downloaded      string `json:"downloaded"`
+	Downloads       int64  `json:"downloads"`
+	CacheSize       int64  `json:"cache_size_bytes"`
+	Artifacts       int64  `json:"cached_artifacts"`
+	Packages        int64  `json:"packages"`
+	Versions        int64  `json:"versions"`
 }
 
 // handleStats returns cache statistics.
@@ -1147,15 +1169,42 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A failing per-ecosystem aggregation must not take down an endpoint that
+	// answered from two cheap counters before it existed. Get returns the last
+	// good snapshot alongside the error, so the breakdown is served stale when
+	// there is one, and flagged unavailable when there is not.
+	ecosystems, statsErr := s.ecoStats.Get(s.db)
+	if statsErr != nil {
+		s.logger.Error("failed to get ecosystem stats for /stats", "error", statsErr)
+	}
+
 	_ = ctx // Could use for storage.UsedSpace if needed
 
 	stats := StatsResponse{
-		CachedArtifacts: count,
-		TotalSize:       size,
-		TotalSizeHuman:  formatSize(size),
-		StorageURL:      s.storage.URL(),
-		DatabasePath:    s.cfg.Database.String(),
+		CachedArtifacts:  count,
+		TotalSize:        size,
+		TotalSizeHuman:   formatSize(size),
+		Ecosystems:       make([]EcosystemStatsEntry, 0, len(ecosystems)),
+		StatsUnavailable: statsErr != nil && len(ecosystems) == 0,
+		StorageURL:       s.storage.URL(),
+		DatabasePath:     s.cfg.Database.String(),
 	}
+
+	for _, e := range ecosystems {
+		stats.DownloadedBytes += e.DownloadedBytes
+		stats.Downloads += e.Downloads
+		stats.Ecosystems = append(stats.Ecosystems, EcosystemStatsEntry{
+			Ecosystem:       e.Ecosystem,
+			DownloadedBytes: e.DownloadedBytes,
+			Downloaded:      formatSize(e.DownloadedBytes),
+			Downloads:       e.Downloads,
+			CacheSize:       e.CacheSize,
+			Artifacts:       e.Artifacts,
+			Packages:        e.Packages,
+			Versions:        e.Versions,
+		})
+	}
+	stats.DownloadedBytesHuman = formatSize(stats.DownloadedBytes)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(stats)

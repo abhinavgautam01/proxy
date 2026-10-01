@@ -1184,6 +1184,8 @@ The proxy stores no time series. The page reads the database and the in-process 
 
 For history, trends and alerting, scrape `/metrics` with Prometheus. That is the intended split: the UI answers "what is true now", Prometheus answers "what happened".
 
+The same figures are available as JSON from `GET /stats`, which reports `downloaded_bytes`, `downloads` and an `ecosystems` array carrying the per-ecosystem breakdown, served from the same 60-second snapshot the page and the gauges read. When the aggregation fails with no snapshot to fall back on, the response carries `stats_unavailable: true` rather than passing zeros off as a count -- the endpoint keeps answering with the artifact count and cache size either way.
+
 #### Three ecosystem label sets
 
 `ecosystem` means three slightly different things across `/metrics`, and queries that join across them need to know which.
