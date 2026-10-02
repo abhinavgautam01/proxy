@@ -370,6 +370,14 @@ type StorageConfig struct {
 	// storage at an internal address (e.g. 127.0.0.1 or a Docker hostname)
 	// but clients must use a public one.
 	DirectServeBaseURL string `json:"direct_serve_base_url" yaml:"direct_serve_base_url"`
+
+	// CacheArtifacts stores fetched artifacts so later downloads are served
+	// from storage. When false, every download streams from upstream and
+	// nothing is stored; metadata is still cached, and cooldown and the
+	// denylist still apply. Useful when another caching layer sits in front
+	// of the proxy. False is incompatible with scanning, direct_serve and
+	// mirror_api, which all depend on stored artifacts. Default: true.
+	CacheArtifacts bool `json:"cache_artifacts" yaml:"cache_artifacts"`
 }
 
 // GradleConfig configures Gradle-specific features.
@@ -418,6 +426,12 @@ type DatabaseConfig struct {
 
 	// URL is the PostgreSQL connection string.
 	URL string `json:"url" yaml:"url"`
+
+	// HitFlushInterval is how often cache hit counts and last-access times
+	// are written, batched in one transaction. Uses Go duration syntax
+	// (e.g. "1s", "10s"). Default: "1s". Set to "0" to write each hit as it
+	// happens.
+	HitFlushInterval string `json:"hit_flush_interval" yaml:"hit_flush_interval"`
 }
 
 // String returns a human-readable description of the configured database
@@ -757,8 +771,9 @@ func Default() *Config {
 		Listen:  ":8080",
 		BaseURL: "http://localhost:8080",
 		Storage: StorageConfig{
-			Path:    "./cache/artifacts",
-			MaxSize: "",
+			Path:           "./cache/artifacts",
+			MaxSize:        "",
+			CacheArtifacts: true,
 		},
 		Database: DatabaseConfig{
 			Driver: "sqlite",
@@ -893,9 +908,11 @@ func (c *Config) LoadFromEnv() {
 	setEnvBool(&c.Storage.DirectServe, "PROXY_STORAGE_DIRECT_SERVE")
 	setEnvString(&c.Storage.DirectServeTTL, "PROXY_STORAGE_DIRECT_SERVE_TTL")
 	setEnvString(&c.Storage.DirectServeBaseURL, "PROXY_STORAGE_DIRECT_SERVE_BASE_URL")
+	setEnvBool(&c.Storage.CacheArtifacts, "PROXY_STORAGE_CACHE_ARTIFACTS")
 	setEnvString(&c.Database.Driver, "PROXY_DATABASE_DRIVER")
 	setEnvString(&c.Database.Path, "PROXY_DATABASE_PATH")
 	setEnvString(&c.Database.URL, "PROXY_DATABASE_URL")
+	setEnvString(&c.Database.HitFlushInterval, "PROXY_DATABASE_HIT_FLUSH_INTERVAL")
 	setEnvString(&c.Log.Level, "PROXY_LOG_LEVEL")
 	setEnvString(&c.Log.Format, "PROXY_LOG_FORMAT")
 	setEnvString(&c.AccessLog.Path, "PROXY_ACCESS_LOG_PATH")
@@ -1023,6 +1040,10 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if err := c.validateCacheArtifacts(); err != nil {
+		return err
+	}
+
 	// Validate metadata TTL if specified
 	if c.MetadataTTL != "" && c.MetadataTTL != "0" {
 		if _, err := time.ParseDuration(c.MetadataTTL); err != nil {
@@ -1038,7 +1059,26 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	if err := validateHitFlushInterval(c.Database.HitFlushInterval); err != nil {
+		return err
+	}
+
 	return c.validateComponents()
+}
+
+func (c *Config) validateCacheArtifacts() error {
+	if c.Storage.CacheArtifacts {
+		return nil
+	}
+	switch {
+	case c.Scanning.Enabled:
+		return fmt.Errorf("storage.cache_artifacts: false cannot be combined with scanning.enabled: scanning needs stored artifacts")
+	case c.Storage.DirectServe:
+		return fmt.Errorf("storage.cache_artifacts: false cannot be combined with storage.direct_serve: no artifacts are stored to redirect to")
+	case c.MirrorAPI:
+		return fmt.Errorf("storage.cache_artifacts: false cannot be combined with mirror_api: mirrored artifacts would never be served")
+	}
+	return nil
 }
 
 func (c *Config) validateComponents() error {
@@ -1120,6 +1160,7 @@ const (
 	defaultMetadataTTL                   = 5 * time.Minute  //nolint:mnd // sensible default
 	defaultDirectServeTTL                = 15 * time.Minute //nolint:mnd // sensible default
 	defaultHTTPTimeout                   = 30 * time.Second //nolint:mnd // sensible default
+	defaultHitFlushInterval              = time.Second
 	defaultMetadataMaxSize               = 100 << 20
 	defaultGradleBuildCacheMaxUploadSize = 100 << 20
 	defaultGradleBuildCacheSweepInterval = 10 * time.Minute
@@ -1194,6 +1235,36 @@ func (c *Config) ParseHTTPTimeout() time.Duration {
 	d, err := time.ParseDuration(c.HTTPTimeout)
 	if err != nil || d < 0 {
 		return defaultHTTPTimeout
+	}
+	return d
+}
+
+func validateHitFlushInterval(s string) error {
+	if s == "" || s == "0" {
+		return nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("invalid database.hit_flush_interval %q: %w", s, err)
+	}
+	if d < 0 {
+		return fmt.Errorf("invalid database.hit_flush_interval %q: must be non-negative", s)
+	}
+	return nil
+}
+
+// ParseHitFlushInterval returns how often batched cache hits are written.
+// Returns 1 second if unset or invalid, 0 if explicitly disabled.
+func (c *Config) ParseHitFlushInterval() time.Duration {
+	if c.Database.HitFlushInterval == "" {
+		return defaultHitFlushInterval
+	}
+	if c.Database.HitFlushInterval == "0" {
+		return 0
+	}
+	d, err := time.ParseDuration(c.Database.HitFlushInterval)
+	if err != nil || d < 0 {
+		return defaultHitFlushInterval
 	}
 	return d
 }

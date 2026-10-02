@@ -81,12 +81,20 @@ func (s *Server) LoggerMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// requestEcosystem names the ecosystem a request path belongs to.
+//
+// Every mounted package route must appear here. An unlisted one falls to
+// "other" along with the UI, health and metrics paths, pooling a real
+// ecosystem's traffic with traffic that belongs to no ecosystem at all.
 func requestEcosystem(path string) string {
 	segment, _, _ := strings.Cut(strings.TrimPrefix(path, "/"), "/")
 	switch segment {
 	case "npm", "cargo", "hex", "pub", "pypi", "maven", "gradle", "nuget",
-		"conan", "conda", "cran", "julia", "debian", "rpm":
+		"conan", "conda", "cran", "julia", "debian", "rpm",
+		"helm", "homebrew", "generic", "swift":
 		return segment
+	case "apk":
+		return "alpine"
 	case "gem":
 		return "rubygems"
 	case "go":

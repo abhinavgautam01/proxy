@@ -151,6 +151,7 @@ func New(cfg *config.Config, logger *slog.Logger, buildInfo BuildInfo) (*Server,
 		_ = db.Close()
 		return nil, fmt.Errorf("migrating database schema: %w", err)
 	}
+	db.BatchHits(cfg.ParseHitFlushInterval(), logger)
 
 	// Initialize storage
 	storageURL := cfg.Storage.URL
@@ -257,6 +258,7 @@ func (s *Server) serve(listener net.Listener) error {
 	proxy.DirectServe = s.cfg.Storage.DirectServe
 	proxy.DirectServeTTL = s.cfg.ParseDirectServeTTL()
 	proxy.DirectServeBaseURL = s.cfg.Storage.DirectServeBaseURL
+	proxy.StreamArtifacts = !s.cfg.Storage.CacheArtifacts
 
 	// Create router with Chi
 	r := chi.NewRouter()

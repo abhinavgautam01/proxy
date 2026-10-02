@@ -52,6 +52,12 @@ storage:
   # Empty or "0" means unlimited
   max_size: ""
 
+  # Store fetched artifacts. Set to false to stream every download from
+  # upstream without storing it; metadata filtering, cooldown and the
+  # denylist still apply. Useful when another cache sits in front of the
+  # proxy. false is incompatible with direct_serve, scanning and mirror_api.
+  cache_artifacts: true
+
   # Redirect cached artifact downloads to presigned storage URLs (HTTP 302)
   # instead of streaming through the proxy. Only effective for S3, GCS, and Azure.
   # Leave disabled if clients reach the proxy through an authenticating gateway,
@@ -80,6 +86,10 @@ database:
   # PostgreSQL connection URL (used when driver is "postgres")
   # Example: "postgres://user:password@localhost:5432/proxy?sslmode=disable"
   url: ""
+
+  # How often cache hit counts and last-access times are written, batched in
+  # one transaction. "0" writes each hit as it happens.
+  hit_flush_interval: "1s"
 
 # Logging configuration
 log:

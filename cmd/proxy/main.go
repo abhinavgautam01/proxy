@@ -479,6 +479,10 @@ func runMirror() {
 		fmt.Fprintf(os.Stderr, "invalid configuration: %v\n", err)
 		os.Exit(1)
 	}
+	if !cfg.Storage.CacheArtifacts {
+		fmt.Fprintf(os.Stderr, "error: mirror is not available with storage.cache_artifacts: false: mirrored artifacts would never be served\n")
+		os.Exit(1)
+	}
 
 	logger := setupLogger("info", "text")
 
