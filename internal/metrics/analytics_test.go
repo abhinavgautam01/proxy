@@ -3,7 +3,6 @@ package metrics
 import (
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
@@ -68,9 +67,6 @@ func TestUpdateEcosystemStatsNormalizesLabels(t *testing.T) {
 // carrying both spellings of an aliased ecosystem yields two rows that
 // normalize to one label. They must sum rather than overwrite each other.
 func TestUpdateEcosystemStatsSumsAliasedRows(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	reg.MustRegister(EcosystemDownloadedBytes, EcosystemCacheSize, EcosystemPackages)
-
 	UpdateEcosystemStats([]EcosystemStats{
 		{Ecosystem: "gem", DownloadedBytes: 100, CacheSize: 10, Packages: 1},
 		{Ecosystem: "rubygems", DownloadedBytes: 200, CacheSize: 20, Packages: 2},
