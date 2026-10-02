@@ -559,6 +559,35 @@ const docTemplate = `{
                 }
             }
         },
+        "server.EcosystemStatsEntry": {
+            "type": "object",
+            "properties": {
+                "cache_size_bytes": {
+                    "type": "integer"
+                },
+                "cached_artifacts": {
+                    "type": "integer"
+                },
+                "downloaded": {
+                    "type": "string"
+                },
+                "downloaded_bytes": {
+                    "type": "integer"
+                },
+                "downloads": {
+                    "type": "integer"
+                },
+                "ecosystem": {
+                    "type": "string"
+                },
+                "packages": {
+                    "type": "integer"
+                },
+                "versions": {
+                    "type": "integer"
+                }
+            }
+        },
         "server.ErrorResponse": {
             "type": "object",
             "properties": {
@@ -805,6 +834,26 @@ const docTemplate = `{
                 },
                 "database_path": {
                     "type": "string"
+                },
+                "downloaded": {
+                    "type": "string"
+                },
+                "downloaded_bytes": {
+                    "description": "DownloadedBytes is the accumulated download volume across every\necosystem: cache hits multiplied by the artifact size they served.",
+                    "type": "integer"
+                },
+                "downloads": {
+                    "type": "integer"
+                },
+                "ecosystems": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/server.EcosystemStatsEntry"
+                    }
+                },
+                "stats_unavailable": {
+                    "description": "StatsUnavailable distinguishes a proxy that has served nothing from one\nwhose aggregation failed with no snapshot to fall back on. Without it\nboth report zeros and an empty array.",
+                    "type": "boolean"
                 },
                 "storage_url": {
                     "type": "string"
