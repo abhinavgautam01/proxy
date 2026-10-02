@@ -115,6 +115,7 @@ type Server struct {
 	ecr         *ecrTokens
 	breakers    *breakerMonitor
 	ecoStats    ecosystemStatsCache
+	sources     sourceTracker
 }
 
 // New creates a new Server with the given configuration.

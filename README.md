@@ -1147,6 +1147,8 @@ The proxy exposes Prometheus metrics at `GET /metrics`. All metric names are pre
 | `proxy_ecosystem_packages` | gauge | `ecosystem` | Known packages per ecosystem. |
 | `proxy_ecosystem_versions` | gauge | `ecosystem` | Known package versions per ecosystem. |
 | `proxy_response_bytes_total` | counter | `ecosystem` | Response body bytes written to clients. Route-labelled, see the label caveat below. |
+| `proxy_client_requests_total` | counter | `client` | Requests by client tool, from the User-Agent. |
+| `proxy_client_response_bytes_total` | counter | `client` | Response bytes by client tool. |
 
 The `ecosystem` label on `proxy_requests_total` and `proxy_request_duration_seconds` is the mounted route a request arrived on, not the ecosystem recorded against the package it served: `/gem` reports as `rubygems`, `/go` as `golang`, `/composer` as `packagist`, `/apk` as `alpine` and `/v2` as `oci`. Anything outside a package route -- the UI, `/health`, `/metrics`, `/stats` -- reports as `other`, and so did `/apk`, `/helm`, `/homebrew`, `/generic` and `/swift` before they were listed; traffic on those five routes now appears under its own name instead.
 
@@ -1197,6 +1199,22 @@ The same figures are available as JSON from `GET /stats`, which reports `downloa
 **From the request path.** `proxy_requests_total`, `proxy_request_duration_seconds` and `proxy_response_bytes_total`. The names mostly coincide with the normalized ones -- these also report `rubygems`, `packagist` and `golang` -- but the Debian route reports `debian` where the package record says `deb`, and any path that is not a package endpoint reports `other`, which corresponds to no ecosystem at all.
 
 **From the handler's own name.** `proxy_upstream_fetch_duration_seconds` and `proxy_upstream_errors_total`, which report `composer`, `gem` and `go` where the other two sets report `packagist`, `rubygems` and `golang`. These are published series and are deliberately left as they are; renaming them would break existing queries and alerts.
+
+### Request sources
+
+Package managers do not say who invoked them. A request from `pip` or `go` carries a `Host`, an `Accept` and a `User-Agent` -- no `Referer`, no originating URL, nothing naming a repository, pipeline or job. Whatever identity you want has to come from something on the wire, so the proxy attributes requests by the two things always present.
+
+**Address** -- the TCP peer, or the leftmost `X-Forwarded-For` entry when `trust_forwarded_for` is enabled. Enable that only behind a load balancer or ingress that sets the header; any client can send it, so in front of one it lets a caller forge its own attribution and, by cycling synthetic addresses, fill the table and push every genuine caller into the overflow row. The totals stay correct; the attribution is what is lost.
+
+**Client** -- the tool, taken from the leading User-Agent token: `pip`, `npm`, `go`, `docker`, `apt`, `curl` and so on. Anything unrecognised reports as `other`.
+
+Set `ui_request_sources: true` and both appear on `/ui/analytics` under **Runtime -> Request sources**, as a table of the busiest callers by bytes downloaded plus a per-tool breakdown. The table is in-memory and process-lifetime, like the rest of that card. It tracks 200 callers, evicting the least recently seen once full, and summarises everything it is not showing individually -- both evicted callers and those ranked below the display limit -- in a single "other callers" row, so the rows always add up to the totals above them.
+
+**The flag defaults to off because the page is not authenticated.** `/ui` carries no auth of its own -- it is mounted under its own prefix so a reverse proxy *can* gate it separately, as [Behind a Reverse Proxy](#behind-a-reverse-proxy) describes, but nothing makes you -- and until now it exposed only package data. The sources table changes what is on offer: anyone who can reach the proxy can read the addresses of your build fleet, which tool each runs, and how much each pulled. Turn it on once `/ui` is gated, or leave it off and read the same detail from the access log.
+
+**What this can and cannot tell you.** How much an address gives you depends entirely on your network. A fleet of build machines with stable addresses attributes cleanly. Containerised CI usually does not: with Docker or Kubernetes executors every job gets an ephemeral address, and egress is commonly NAT'd behind one gateway, so you get runner-node or gateway granularity, not per-project. If you need per-project attribution the caller has to send something naming itself -- a basic-auth username, or a per-project base URL -- which the proxy does not currently read. Say so and it can be added.
+
+**Why addresses are not Prometheus labels.** Client tool names are exported as `proxy_client_requests_total{client}` because they come from a closed set. Addresses are not exported at all: the caller set is unbounded and outside the proxy's control, and every new address would create a time series that lives forever in your TSDB. The same goes for anything job-scoped -- a pipeline ID must never become a label. Per-address and per-request detail belongs in the access log, which records `remote_ip`, `user_agent`, `client`, `ecosystem` and `bytes` on every line as JSONL, ready for `jq`, Loki or whatever you ship logs to.
 
 ### Grafana dashboard
 

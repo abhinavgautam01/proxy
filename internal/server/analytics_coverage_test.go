@@ -26,7 +26,9 @@ var metricSurface = map[string]string{
 	"proxy_cached_artifacts_total":       "Cached artifacts tile",
 
 	// Request-path counters.
-	"proxy_response_bytes_total": "Runtime: Served",
+	"proxy_response_bytes_total":        "Runtime: Served",
+	"proxy_client_requests_total":       "Runtime: Request sources -- By client",
+	"proxy_client_response_bytes_total": "Runtime: Request sources -- By client",
 
 	// Registry-derived, shown in the Runtime card.
 	"proxy_requests_total":                     "Runtime: Requests + Responses by status",
@@ -54,7 +56,7 @@ func TestEveryMetricIsSurfaced(t *testing.T) {
 	// Touch every metric family so it is present in the registry output, since
 	// a vector with no observed label values gathers as nothing at all.
 	metrics.RecordRequest("npm", 200, 0)
-	metrics.RecordResponse("npm", 1)
+	metrics.RecordResponse("npm", "npm", 1)
 	metrics.RecordCacheHit("npm")
 	metrics.RecordCacheMiss("npm")
 	metrics.RecordUpstreamFetch("npm", 0)
