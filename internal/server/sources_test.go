@@ -423,8 +423,14 @@ func TestAnalyticsPageHidesSourcesByDefault(t *testing.T) {
 	if strings.Contains(body, "10.1.2.3") {
 		t.Error("a caller address rendered with ui_request_sources off")
 	}
-	if strings.Contains(body, "Request sources") {
-		t.Error("the sources card rendered with ui_request_sources off")
+	// The by-client table carries no addresses and the same figures are already
+	// public at /metrics, so it renders either way; only the address table is
+	// gated.
+	if !strings.Contains(body, "By client") {
+		t.Error("the by-client table was gated along with the address table")
+	}
+	if !strings.Contains(body, "ui_request_sources") {
+		t.Error("the off-state note naming the config key did not render")
 	}
 }
 

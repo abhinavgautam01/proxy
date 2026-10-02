@@ -93,19 +93,26 @@
 
         <!-- Who is calling. Addresses are never metric labels: the caller set is
              unbounded, so per-address detail lives here and in the access log. -->
-        {{if .SourcesOn}}
         <div class="border-t border-gray-200 dark:border-gray-800 pt-6">
             <div class="flex flex-wrap items-baseline justify-between gap-2 mb-4">
                 <h3 class="text-sm font-semibold">Request sources</h3>
+                {{if .SourcesOn}}
                 <p class="text-xs text-gray-500 dark:text-gray-400">
                     {{if .TrustsForward}}Attributed by X-Forwarded-For{{else}}Attributed by peer address{{end}}
                     {{- if .SourceCount}} · {{.SourceCount}} tracked{{end}}
                 </p>
+                {{end}}
             </div>
 
             <div class="grid lg:grid-cols-3 gap-8">
                 <div class="lg:col-span-2 overflow-x-auto">
-                    {{if .Sources}}
+                    {{if not .SourcesOn}}
+                    <p class="text-sm text-gray-500 dark:text-gray-400">
+                        Per-caller addresses are off. Set <code class="text-xs">ui_request_sources: true</code>
+                        to show them here, once <code class="text-xs">/ui</code> is behind authentication;
+                        the per-request detail is in the access log.
+                    </p>
+                    {{else if .Sources}}
                     <table class="w-full text-sm">
                         <thead class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
                             <tr>
@@ -153,7 +160,6 @@
                 </div>
             </div>
         </div>
-        {{end}}
 
         {{if .ScanningOn}}
         <div class="border-t border-gray-200 dark:border-gray-800 pt-6">
