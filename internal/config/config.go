@@ -370,6 +370,14 @@ type StorageConfig struct {
 	// storage at an internal address (e.g. 127.0.0.1 or a Docker hostname)
 	// but clients must use a public one.
 	DirectServeBaseURL string `json:"direct_serve_base_url" yaml:"direct_serve_base_url"`
+
+	// CacheArtifacts stores fetched artifacts so later downloads are served
+	// from storage. When false, every download streams from upstream and
+	// nothing is stored; metadata is still cached, and cooldown and the
+	// denylist still apply. Useful when another caching layer sits in front
+	// of the proxy. False is incompatible with scanning, direct_serve and
+	// mirror_api, which all depend on stored artifacts. Default: true.
+	CacheArtifacts bool `json:"cache_artifacts" yaml:"cache_artifacts"`
 }
 
 // GradleConfig configures Gradle-specific features.
@@ -757,8 +765,9 @@ func Default() *Config {
 		Listen:  ":8080",
 		BaseURL: "http://localhost:8080",
 		Storage: StorageConfig{
-			Path:    "./cache/artifacts",
-			MaxSize: "",
+			Path:           "./cache/artifacts",
+			MaxSize:        "",
+			CacheArtifacts: true,
 		},
 		Database: DatabaseConfig{
 			Driver: "sqlite",
@@ -893,6 +902,7 @@ func (c *Config) LoadFromEnv() {
 	setEnvBool(&c.Storage.DirectServe, "PROXY_STORAGE_DIRECT_SERVE")
 	setEnvString(&c.Storage.DirectServeTTL, "PROXY_STORAGE_DIRECT_SERVE_TTL")
 	setEnvString(&c.Storage.DirectServeBaseURL, "PROXY_STORAGE_DIRECT_SERVE_BASE_URL")
+	setEnvBool(&c.Storage.CacheArtifacts, "PROXY_STORAGE_CACHE_ARTIFACTS")
 	setEnvString(&c.Database.Driver, "PROXY_DATABASE_DRIVER")
 	setEnvString(&c.Database.Path, "PROXY_DATABASE_PATH")
 	setEnvString(&c.Database.URL, "PROXY_DATABASE_URL")
@@ -1023,6 +1033,10 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if err := c.validateCacheArtifacts(); err != nil {
+		return err
+	}
+
 	// Validate metadata TTL if specified
 	if c.MetadataTTL != "" && c.MetadataTTL != "0" {
 		if _, err := time.ParseDuration(c.MetadataTTL); err != nil {
@@ -1039,6 +1053,21 @@ func (c *Config) Validate() error {
 	}
 
 	return c.validateComponents()
+}
+
+func (c *Config) validateCacheArtifacts() error {
+	if c.Storage.CacheArtifacts {
+		return nil
+	}
+	switch {
+	case c.Scanning.Enabled:
+		return fmt.Errorf("storage.cache_artifacts: false cannot be combined with scanning.enabled: scanning needs stored artifacts")
+	case c.Storage.DirectServe:
+		return fmt.Errorf("storage.cache_artifacts: false cannot be combined with storage.direct_serve: no artifacts are stored to redirect to")
+	case c.MirrorAPI:
+		return fmt.Errorf("storage.cache_artifacts: false cannot be combined with mirror_api: mirrored artifacts would never be served")
+	}
+	return nil
 }
 
 func (c *Config) validateComponents() error {

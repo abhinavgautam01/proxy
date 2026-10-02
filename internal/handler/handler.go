@@ -175,6 +175,11 @@ type Proxy struct {
 	HTTPClient         *http.Client
 	AuthForURL         func(string) (headerName, headerValue string)
 
+	// StreamArtifacts streams artifacts from upstream without storing them.
+	// Each request fetches its own copy: there is no cache to check and
+	// nothing for concurrent misses to share.
+	StreamArtifacts bool
+
 	// Scanners runs pre-cache artifact scanning (e.g. trivy, ClamAV, Wiz).
 	// Nil or disabled means artifacts are cached without scanning.
 	Scanners *scanner.Group
@@ -242,6 +247,17 @@ func (p *Proxy) GetOrFetchArtifact(ctx context.Context, ecosystem, name, version
 			return nil, errors.New("resolved artifact has no filename")
 		}
 	}
+	if p.StreamArtifacts {
+		if info == nil {
+			if info, err = p.resolveArtifact(ctx, ecosystem, name, version); err != nil {
+				return nil, err
+			}
+		}
+		return p.streamFromUpstream(ctx, ecosystem, name, version, filename, versionPURL, info.URL, "",
+			func(fetchCtx context.Context) (*fetch.Artifact, error) {
+				return p.Fetcher.Fetch(fetchCtx, info.URL)
+			})
+	}
 	if cached, err := p.checkCache(ctx, pkgPURL, versionPURL, filename); err != nil {
 		return nil, err
 	} else if cached != nil {
@@ -289,9 +305,14 @@ func (p *Proxy) ClearCachedArtifact(ecosystem, name, version, filename string) e
 }
 
 // checkCache looks up an artifact in the cache. Returns nil if not cached.
+// With StreamArtifacts set it always reports a miss, so entries stored before the
+// mode was enabled are never served.
 func (p *Proxy) checkCache(ctx context.Context, pkgPURL, versionPURL, filename string) (*CacheResult, error) {
 	if p.Denylist.Denied(versionPURL) {
 		return nil, fmt.Errorf("%w: %s", ErrVersionDenied, versionPURL)
+	}
+	if p.StreamArtifacts {
+		return nil, nil
 	}
 	artifact, err := p.DB.GetCachedArtifact(pkgPURL, versionPURL, filename)
 	if err != nil {
@@ -764,7 +785,14 @@ func serveArtifact(w http.ResponseWriter, method string, result *CacheResult) {
 		buffer := artifactCopyBufferPool.Get().(*[]byte)
 		defer artifactCopyBufferPool.Put(buffer)
 		// Hide optional ReaderFrom methods so io.CopyBuffer uses the pooled buffer.
-		_, _ = io.CopyBuffer(struct{ io.Writer }{w}, result.Reader, *buffer)
+		written, err := io.CopyBuffer(struct{ io.Writer }{w}, result.Reader, *buffer)
+		if err != nil || (result.Artifact.Size > 0 && written != result.Artifact.Size) {
+			// Headers are already committed, so an error status is no longer
+			// possible. Aborting leaves the response unterminated and the
+			// client discards it instead of keeping a truncated or unverified
+			// artifact.
+			panic(http.ErrAbortHandler)
+		}
 	}
 }
 
@@ -1320,6 +1348,12 @@ func (p *Proxy) getOrFetchArtifactFromURLWithCachePURLs(ctx context.Context, eco
 	if p.versionDenied(ecosystem, name, version) {
 		return nil, fmt.Errorf("%w: %s", ErrVersionDenied, canonicalVersionPURL(ecosystem, name, version))
 	}
+	if p.StreamArtifacts {
+		return p.streamFromUpstream(ctx, ecosystem, name, version, filename, versionPURL, downloadURL, upstreamHash,
+			func(fetchCtx context.Context) (*fetch.Artifact, error) {
+				return p.Fetcher.FetchWithHeaders(fetchCtx, downloadURL, headers)
+			})
+	}
 	if cached, err := p.getCachedArtifactWithUpstreamHash(ctx, pkgPURL, versionPURL, filename, upstreamHash); err != nil {
 		return nil, err
 	} else if cached != nil {
@@ -1400,6 +1434,88 @@ func (p *Proxy) fetchAndCacheFromURL(ctx context.Context, ecosystem, name, versi
 	}
 
 	return p.storeArtifact(ctx, ecosystem, name, version, filename, pkgPURL, versionPURL, downloadURL, upstreamHash, artifact)
+}
+
+// streamFromUpstream fetches an artifact when StreamArtifacts is set and hands its
+// body to the caller without storing it.
+//
+// With upstreamHash set the body is verified as it streams. The size is left
+// unknown so the response goes out chunked: a mismatch only shows at EOF,
+// after the bytes have been sent, and an unterminated chunked response is the
+// only way left to make the client reject them (see serveArtifact).
+func (p *Proxy) streamFromUpstream(ctx context.Context, ecosystem, name, version, filename, versionPURL, upstreamURL, upstreamHash string, fetchArtifact func(context.Context) (*fetch.Artifact, error)) (*CacheResult, error) {
+	p.Logger.Info("streaming from upstream",
+		"ecosystem", ecosystem, "name", name, "version", version, "url", upstreamURL)
+
+	fetchStart := time.Now()
+	artifact, err := fetchArtifact(ctx)
+	metrics.RecordUpstreamFetch(ecosystem, time.Since(fetchStart))
+	if err != nil {
+		metrics.RecordUpstreamError(ecosystem, "fetch_failed")
+		if errors.Is(err, fetch.ErrNotFound) {
+			return nil, ErrUpstreamNotFound
+		}
+		return nil, fmt.Errorf("fetching from upstream: %w", err)
+	}
+
+	body := &streamErrorLogger{
+		ReadCloser: artifact.Body,
+		onError: func(read int64, err error) {
+			p.Logger.Warn("streaming artifact from upstream failed",
+				"purl", versionPURL, "filename", filename, "url", upstreamURL, "bytes", read, "error", err)
+			metrics.RecordUpstreamError(ecosystem, "stream_failed")
+		},
+	}
+	result := &CacheResult{
+		Reader: body,
+		Artifact: artifacts.Artifact{
+			PURL:      versionPURL,
+			Size:      artifact.Size,
+			Filename:  filename,
+			MediaType: artifact.ContentType,
+		},
+	}
+	if upstreamHash == "" {
+		return result, nil
+	}
+
+	hash := strings.ToLower(upstreamHash)
+	checks, err := newIntegrityChecks(hash, "")
+	if err != nil {
+		_ = artifact.Body.Close()
+		return nil, fmt.Errorf("parsing upstream digest: %w", err)
+	}
+	result.Reader, err = checks.wrapFailOnMismatch(body, func(reason string) {
+		p.Logger.Error("streamed artifact failed integrity check",
+			"purl", versionPURL, "filename", filename, "url", upstreamURL, "reason", reason)
+		metrics.RecordIntegrityFailure(purl.NormalizeEcosystem(ecosystem))
+	})
+	if err != nil {
+		_ = artifact.Body.Close()
+		return nil, err
+	}
+	result.Artifact.Digest = digest.Digest("sha256:" + hash)
+	result.Artifact.Size = -1
+	return result, nil
+}
+
+// streamErrorLogger reports the first read error of a streamed upstream body.
+// The error itself still reaches serveArtifact, which aborts the response.
+type streamErrorLogger struct {
+	io.ReadCloser
+	onError func(read int64, err error)
+	read    int64
+	logged  bool
+}
+
+func (r *streamErrorLogger) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	r.read += int64(n)
+	if err != nil && err != io.EOF && !r.logged {
+		r.logged = true
+		r.onError(r.read, err)
+	}
+	return n, err
 }
 
 // ErrArtifactDigestMismatch indicates that fetched bytes did not match the

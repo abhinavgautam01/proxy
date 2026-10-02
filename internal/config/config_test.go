@@ -1303,3 +1303,61 @@ func TestValidateNamedUpstreams(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateCacheArtifactsDisabled(t *testing.T) {
+	tests := []struct {
+		name    string
+		modify  func(*Config)
+		wantErr string
+	}{
+		{"alone", func(*Config) {}, ""},
+		{"with scanning", func(c *Config) { c.Scanning.Enabled = true }, "scanning.enabled"},
+		{"with direct_serve", func(c *Config) { c.Storage.DirectServe = true }, "storage.direct_serve"},
+		{"with mirror_api", func(c *Config) { c.MirrorAPI = true }, "mirror_api"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Storage.CacheArtifacts = false
+			tt.modify(cfg)
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() = %v, want an error mentioning %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestCacheArtifactsDefaultsToTrue(t *testing.T) {
+	if !Default().Storage.CacheArtifacts {
+		t.Fatal("Default().Storage.CacheArtifacts = false, want true")
+	}
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("storage:\n  url: \"file:///tmp/cache\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Storage.CacheArtifacts {
+		t.Error("a config file without storage.cache_artifacts disabled artifact caching")
+	}
+}
+
+func TestLoadCacheArtifactsFromEnv(t *testing.T) {
+	cfg := Default()
+	t.Setenv("PROXY_STORAGE_CACHE_ARTIFACTS", "false")
+	cfg.LoadFromEnv()
+
+	if cfg.Storage.CacheArtifacts {
+		t.Error("Storage.CacheArtifacts should be false")
+	}
+}
