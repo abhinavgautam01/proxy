@@ -939,6 +939,61 @@ func TestLoadHTTPTimeoutFromEnv(t *testing.T) {
 	}
 }
 
+func TestParseHitFlushInterval(t *testing.T) {
+	tests := []struct {
+		name     string
+		interval string
+		want     time.Duration
+	}{
+		{"empty defaults to 1s", "", time.Second},
+		{"explicit zero disables", "0", 0},
+		{"10 seconds", "10s", 10 * time.Second},
+		{"invalid defaults to 1s", "not-a-duration", time.Second},
+		{"negative defaults to 1s", "-5s", time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Database.HitFlushInterval = tt.interval
+			got := cfg.ParseHitFlushInterval()
+			if got != tt.want {
+				t.Errorf("ParseHitFlushInterval() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateHitFlushInterval(t *testing.T) {
+	cfg := Default()
+	cfg.Database.HitFlushInterval = "not-a-duration"
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected validation error for invalid hit_flush_interval")
+	}
+
+	cfg.Database.HitFlushInterval = "-5s"
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected validation error for negative hit_flush_interval")
+	}
+
+	for _, ok := range []string{"10s", "0", ""} {
+		cfg.Database.HitFlushInterval = ok
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("unexpected error for hit_flush_interval %q: %v", ok, err)
+		}
+	}
+}
+
+func TestLoadHitFlushIntervalFromEnv(t *testing.T) {
+	cfg := Default()
+	t.Setenv("PROXY_DATABASE_HIT_FLUSH_INTERVAL", "10s")
+	cfg.LoadFromEnv()
+
+	if cfg.Database.HitFlushInterval != "10s" {
+		t.Errorf("HitFlushInterval = %q, want %q", cfg.Database.HitFlushInterval, "10s")
+	}
+}
+
 func TestLoadMetadataTTLFromEnv(t *testing.T) {
 	cfg := Default()
 	t.Setenv("PROXY_METADATA_TTL", "10m")

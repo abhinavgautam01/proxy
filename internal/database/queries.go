@@ -398,6 +398,10 @@ func (db *DB) upsertArtifactFrom(a *Artifact, previous sql.NullString) (bool, er
 
 func (db *DB) RecordArtifactHit(versionPURL, filename string) error {
 	now := time.Now()
+	if db.hits != nil {
+		db.hits.add(hitKey{versionPURL, filename}, hitEntry{count: 1, last: now})
+		return nil
+	}
 	query := db.Rebind(`
 		UPDATE artifacts
 		SET hit_count = hit_count + 1, last_accessed_at = ?, updated_at = ?

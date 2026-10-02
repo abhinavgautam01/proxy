@@ -87,6 +87,10 @@ database:
   # Example: "postgres://user:password@localhost:5432/proxy?sslmode=disable"
   url: ""
 
+  # How often cache hit counts and last-access times are written, batched in
+  # one transaction. "0" writes each hit as it happens.
+  hit_flush_interval: "1s"
+
 # Logging configuration
 log:
   # Minimum log level: "debug", "info", "warn", "error"
