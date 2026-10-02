@@ -160,6 +160,7 @@ mux.Handle("/newregistry/", http.StripPrefix("/newregistry", newHandler.Routes()
 - Keep functions short and focused
 - Write tests for new functionality
 - Document exported types and functions
+- A new Prometheus metric needs a tile on `/ui/analytics` and an entry in `metricSurface` (`internal/server/analytics_coverage_test.go`). The page is meant to be a complete view of `/metrics`, so `TestEveryMetricIsSurfaced` fails until both exist.
 
 ## Testing
 

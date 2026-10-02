@@ -190,6 +190,14 @@ var (
 		[]string{"ecosystem"},
 	)
 
+	ResponseBytes = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "proxy_response_bytes_total",
+			Help: "Total response body bytes written to clients, by ecosystem",
+		},
+		[]string{"ecosystem"},
+	)
+
 	// Scanning metrics
 	ScanDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -241,6 +249,7 @@ func init() {
 		EcosystemCachedArtifacts,
 		EcosystemPackages,
 		EcosystemVersions,
+		ResponseBytes,
 		ScanDuration,
 		ScanBlocked,
 		ScanErrors,
@@ -257,6 +266,19 @@ func RecordRequest(ecosystem string, status int, duration time.Duration) {
 	statusStr := strconv.Itoa(status)
 	RequestsTotal.WithLabelValues(ecosystem, statusStr).Inc()
 	RequestDuration.WithLabelValues(ecosystem, statusStr).Observe(duration.Seconds())
+}
+
+// RecordResponse tracks what a client actually downloaded.
+//
+// Distinct from proxy_ecosystem_downloaded_bytes: that gauge is derived from
+// the database and counts cache hits multiplied by artifact size, while this
+// counts body bytes as they are written, including metadata responses and
+// cache misses.
+func RecordResponse(ecosystem string, bytes int64) {
+	if bytes <= 0 {
+		return
+	}
+	ResponseBytes.WithLabelValues(ecosystem).Add(float64(bytes))
 }
 
 // RecordCacheHit increments cache hit counter.

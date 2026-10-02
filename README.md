@@ -1111,6 +1111,7 @@ Response:
 The proxy serves a web UI under `/ui`. No separate frontend build is needed -- templates and assets are embedded in the binary. `GET /` redirects to `/ui/`. The UI is mounted under its own prefix so a reverse proxy can apply different access rules to it than to the package endpoints (for example, requiring auth for `PathPrefix(/ui)` while leaving `/npm`, `/pypi` etc. open to build machines).
 
 - **Dashboard** (`/ui/`) -- cache stats, popular packages, recently cached artifacts, and vulnerability overview.
+- **Analytics** (`/ui/analytics`) -- accumulated download size as a ring broken down by ecosystem with the total in the middle, the cache size, artifact, package and version counts, a per-ecosystem table, the vulnerability overview, and a Runtime card mirroring every counter `/metrics` exposes. See [Analytics](#analytics).
 - **Install guide** (`/ui/install`) -- per-ecosystem configuration instructions, so you don't have to look them up here.
 - **Package browser** (`/ui/packages`) -- browse all cached packages with filtering by ecosystem and sorting by hits, size, name, or vulnerability count.
 - **Search** (`/ui/search?q=...`) -- search cached packages by name.
@@ -1145,6 +1146,7 @@ The proxy exposes Prometheus metrics at `GET /metrics`. All metric names are pre
 | `proxy_ecosystem_cached_artifacts` | gauge | `ecosystem` | Number of cached artifacts per ecosystem. |
 | `proxy_ecosystem_packages` | gauge | `ecosystem` | Known packages per ecosystem. |
 | `proxy_ecosystem_versions` | gauge | `ecosystem` | Known package versions per ecosystem. |
+| `proxy_response_bytes_total` | counter | `ecosystem` | Response body bytes written to clients. Route-labelled, see the label caveat below. |
 
 The `ecosystem` label on `proxy_requests_total` and `proxy_request_duration_seconds` is the mounted route a request arrived on, not the ecosystem recorded against the package it served: `/gem` reports as `rubygems`, `/go` as `golang`, `/composer` as `packagist`, `/apk` as `alpine` and `/v2` as `oci`. Anything outside a package route -- the UI, `/health`, `/metrics`, `/stats` -- reports as `other`, and so did `/apk`, `/helm`, `/homebrew`, `/generic` and `/swift` before they were listed; traffic on those five routes now appears under its own name instead.
 
@@ -1167,6 +1169,32 @@ Alert on `proxy_circuit_breaker_state == 2` sustained for more than a few minute
 Nothing at the schema level ties `artifacts.version_purl` to a version row, so a cached artifact can end up with no ecosystem to attribute it to. Those are reported under the ecosystem `unattributed` rather than dropped, which keeps the per-ecosystem figures adding up to `proxy_cache_size_bytes` and `proxy_cached_artifacts_total`. A non-zero `unattributed` means the database holds artifact rows whose version or package rows have gone missing.
 
 The `ecosystem` label on these six is taken from the package record and normalized, so aliases collapse: a database carrying both `gem` and `rubygems` rows -- the proxy writes the former, git-pkgs the latter -- reports one `rubygems` series with the two summed.
+
+### Analytics
+
+`/ui/analytics` reports the accumulated download size as a ring broken down by ecosystem, the cache figures from the dashboard, a per-ecosystem table, the vulnerability overview, and a **Runtime** card covering every remaining metric `/metrics` exposes.
+
+The ring shows at most six slices, because part-to-whole stops being readable past that. When more ecosystems are active the smallest are folded into a single "Other" slice; the table below lists every one of them, so nothing is hidden, only summarised.
+
+#### No history is kept
+
+The proxy stores no time series. The page reads the database and the in-process metric registry at request time and reports current state; there is nowhere for it to read yesterday's figures from, and nothing is written for tomorrow. That splits the figures in two, and the page says which is which.
+
+**Database-derived figures survive a restart.** Download volume, cache size and the package, version and artifact counts come from the `artifacts`, `packages` and `versions` tables, so they are as durable as the database.
+
+**Registry-derived figures do not.** Everything in the Runtime card -- request counts and latencies, cache hit rate, upstream and storage errors, circuit breaker state, scan results -- lives only in this process's Prometheus registry and starts from zero on restart. A small number there next to a large one above just means the proxy started recently.
+
+For history, trends and alerting, scrape `/metrics` with Prometheus. That is the intended split: the UI answers "what is true now", Prometheus answers "what happened".
+
+#### Three ecosystem label sets
+
+`ecosystem` means three slightly different things across `/metrics`, and queries that join across them need to know which.
+
+**From the package record, normalized.** The six `proxy_ecosystem_*` gauges, `proxy_cache_hits_total`, `proxy_cache_misses_total`, `proxy_integrity_failures_total` and the scan metrics. Aliases collapse here: `gem` reads as `rubygems`, `composer` as `packagist`, `go` as `golang`.
+
+**From the request path.** `proxy_requests_total`, `proxy_request_duration_seconds` and `proxy_response_bytes_total`. The names mostly coincide with the normalized ones -- these also report `rubygems`, `packagist` and `golang` -- but the Debian route reports `debian` where the package record says `deb`, and any path that is not a package endpoint reports `other`, which corresponds to no ecosystem at all.
+
+**From the handler's own name.** `proxy_upstream_fetch_duration_seconds` and `proxy_upstream_errors_total`, which report `composer`, `gem` and `go` where the other two sets report `packagist`, `rubygems` and `golang`. These are published series and are deliberately left as they are; renaming them would break existing queries and alerts.
 
 ### Health Check
 

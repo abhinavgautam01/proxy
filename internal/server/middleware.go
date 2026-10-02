@@ -56,10 +56,15 @@ func (s *Server) LoggerMiddleware(next http.Handler) http.Handler {
 				"path", r.URL.Path,
 				"status", rw.status,
 				"duration", duration,
+				"bytes", rw.bytes,
 				"remote", r.RemoteAddr)
 
+			// Scrapes of /metrics would otherwise attribute themselves,
+			// burying real callers under whatever polls the proxy most often.
 			if r.URL.Path != "/metrics" {
-				metrics.RecordRequest(requestEcosystem(r.URL.Path), rw.status, duration)
+				ecosystem := requestEcosystem(r.URL.Path)
+				metrics.RecordRequest(ecosystem, rw.status, duration)
+				metrics.RecordResponse(ecosystem, rw.bytes)
 			}
 
 			if s.accessLog != nil {
