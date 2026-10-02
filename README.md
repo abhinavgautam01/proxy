@@ -1139,16 +1139,34 @@ The proxy exposes Prometheus metrics at `GET /metrics`. All metric names are pre
 | `proxy_health_probe_failures_total` | counter | `step` | Storage health probe failures by failing step (`write`, `size`, `read`, `verify`, `delete`). |
 | `proxy_circuit_breaker_state` | gauge | `registry` | Artifact-fetch circuit breaker state per upstream registry (0 closed, 2 open). Published once that registry's breaker has tripped. |
 | `proxy_circuit_breaker_trips_total` | counter | `registry` | Circuit breaker trips per upstream registry. |
+| `proxy_ecosystem_downloaded_bytes` | gauge | `ecosystem` | Accumulated bytes served from cache: cache hits multiplied by the artifact size they served. |
+| `proxy_ecosystem_artifact_downloads` | gauge | `ecosystem` | Accumulated artifact downloads served from cache. |
+| `proxy_ecosystem_cache_size_bytes` | gauge | `ecosystem` | Size of cached artifacts per ecosystem. |
+| `proxy_ecosystem_cached_artifacts` | gauge | `ecosystem` | Number of cached artifacts per ecosystem. |
+| `proxy_ecosystem_packages` | gauge | `ecosystem` | Known packages per ecosystem. |
+| `proxy_ecosystem_versions` | gauge | `ecosystem` | Known package versions per ecosystem. |
 
 The `ecosystem` label on `proxy_requests_total` and `proxy_request_duration_seconds` is the mounted route a request arrived on, not the ecosystem recorded against the package it served: `/gem` reports as `rubygems`, `/go` as `golang`, `/composer` as `packagist`, `/apk` as `alpine` and `/v2` as `oci`. Anything outside a package route -- the UI, `/health`, `/metrics`, `/stats` -- reports as `other`, and so did `/apk`, `/helm`, `/homebrew`, `/generic` and `/swift` before they were listed; traffic on those five routes now appears under its own name instead.
 
-Cache size and artifact count are refreshed every 60 seconds. Circuit breaker state is read from the fetcher on each scrape of `/metrics` and each `/health` request, so `proxy_circuit_breaker_trips_total` counts the trips visible between those reads — a breaker that opens and recovers entirely between two scrapes is not counted. The remaining metrics update on each request.
+Cache size, artifact count and the per-ecosystem gauges are refreshed every 60 seconds, from a single pass over the database. Circuit breaker state is read from the fetcher on each scrape of `/metrics` and each `/health` request, so `proxy_circuit_breaker_trips_total` counts the trips visible between those reads — a breaker that opens and recovers entirely between two scrapes is not counted. The remaining metrics update on each request.
 
 The breaker metrics carry one series per upstream host, but only for hosts whose breaker has tripped at least once since startup. A breaker is created per host the proxy fetches artifacts from, and for some ecosystems that host comes from upstream metadata rather than from configuration (composer takes it from a package's `dist.url`, helm from the chart URLs in `index.yaml`), so publishing every host would let upstream content grow the series count for the lifetime of the process. Once a host has tripped it keeps reporting, so a recovery still shows up as a transition to 0 rather than as a series that vanishes. `/health` is not a persistent time series and lists every breaker, tripped or not.
 
 The `registry` label is the host of the URL the artifact was fetched from. Because that URL can come from upstream metadata, it is not always one a host can be read off — a signed `dist.url` that fails to parse, for instance — and such a breaker is labelled `hostless-url-<digest>` instead, where the digest is keyed by a value drawn fresh at startup. Neither `/metrics` nor `/health` requires authentication, so a fetch URL is never published as a label or a key; the digest identifies the breaker for as long as the process runs without revealing the URL behind it or letting a chosen URL be matched against it.
 
 Alert on `proxy_circuit_breaker_state == 2` sustained for more than a few minutes: while a breaker is open, artifact downloads for that upstream fail with HTTP 502 on every cache miss, and only a single probe request per backoff interval reaches the upstream. Cached artifacts keep serving, and so does metadata for the same ecosystem (metadata does not go through the circuit breaker), so installs fail in a way that looks like a partial upstream outage.
+
+#### Accumulated download size
+
+`proxy_ecosystem_downloaded_bytes` is, for every cached artifact, the number of times it was served multiplied by its size. It answers "how much traffic has this proxy actually carried", which is the number that matters when sizing egress or justifying the cache. Two properties are worth knowing before alerting on it.
+
+**It counts cache hits, not upstream fetches.** The request that first pulls an artifact through the proxy is a miss and is not counted; only later hits are. So the accumulated total is also the upstream bandwidth the cache has saved, not the total bytes the proxy has ever sent.
+
+**Eviction removes history.** Evicting an artifact clears its size, so its past hits drop out of the total. That is why these are gauges rather than counters, and why the figure can step downwards. Chart them with `max_over_time` rather than `increase`, and read a drop after an eviction sweep as expected rather than as data loss.
+
+Nothing at the schema level ties `artifacts.version_purl` to a version row, so a cached artifact can end up with no ecosystem to attribute it to. Those are reported under the ecosystem `unattributed` rather than dropped, which keeps the per-ecosystem figures adding up to `proxy_cache_size_bytes` and `proxy_cached_artifacts_total`. A non-zero `unattributed` means the database holds artifact rows whose version or package rows have gone missing.
+
+The `ecosystem` label on these six is taken from the package record and normalized, so aliases collapse: a database carrying both `gem` and `rubygems` rows -- the proxy writes the former, git-pkgs the latter -- reports one `rubygems` series with the two summed.
 
 ### Health Check
 
