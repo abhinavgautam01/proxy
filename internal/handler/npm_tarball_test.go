@@ -1,0 +1,154 @@
+package handler
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/git-pkgs/cooldown"
+	"github.com/git-pkgs/registries/fetch"
+)
+
+func TestNPMContentAddressedTarball(t *testing.T) {
+	for _, tc := range []struct {
+		cacheMetadata, stream bool
+		metadata, tarballs    int64
+	}{
+		{false, false, 2, 1},
+		{false, true, 3, 2},
+		{true, false, 1, 1},
+		{true, true, 1, 2},
+	} {
+		t.Run(fmt.Sprintf("metadata=%t/stream=%t", tc.cacheMetadata, tc.stream), func(t *testing.T) {
+			var metadataCalls, tarballCalls atomic.Int64
+			upstream := npmContentAddressedRegistry(t, &metadataCalls, &tarballCalls)
+			p, _, _, _ := setupTestProxy(t)
+			p.CacheMetadata = tc.cacheMetadata
+			p.MetadataTTL = time.Hour
+			p.StreamArtifacts = tc.stream
+			p.Cooldown = &cooldown.Config{Default: "7d"}
+			p.HTTPClient = upstream.Client()
+			fetcher := fetch.NewFetcher(fetch.WithHTTPClient(upstream.Client()), fetch.WithMaxRetries(0))
+			p.Fetcher = fetcher
+			t.Cleanup(func() { _ = fetcher.Close() })
+			h := NewNPMHandler(p, "http://proxy.test", upstream.URL+"/registry")
+			routes := http.StripPrefix("/npm", h.Routes())
+			metadata := httptest.NewRecorder()
+			routes.ServeHTTP(metadata, httptest.NewRequest(http.MethodGet, "/npm/@example/widget", nil))
+			if metadata.Code != http.StatusOK {
+				t.Fatalf("metadata status = %d: %s", metadata.Code, metadata.Body.String())
+			}
+			tarball := npmVersionTarball(metadata.Body.Bytes(), testVersion100)
+			if want := "http://proxy.test/npm/@example%2Fwidget/-/widget-1.0.0.tgz"; tarball != want {
+				t.Fatalf("rewritten tarball = %q, want %q", tarball, want)
+			}
+			for i := range 2 {
+				response := httptest.NewRecorder()
+				routes.ServeHTTP(response, httptest.NewRequest(http.MethodGet, tarball, nil))
+				if response.Code != http.StatusOK || response.Body.String() != "tarball bytes" {
+					t.Fatalf("download %d = %d %q", i, response.Code, response.Body.String())
+				}
+				if !tc.stream {
+					upstream.Close()
+				}
+			}
+			if metadataCalls.Load() != tc.metadata || tarballCalls.Load() != tc.tarballs {
+				t.Errorf("upstream requests: metadata=%d tarballs=%d, want %d %d", metadataCalls.Load(), tarballCalls.Load(), tc.metadata, tc.tarballs)
+			}
+		})
+	}
+}
+
+func npmContentAddressedRegistry(t *testing.T, metadataCalls, tarballCalls *atomic.Int64) *httptest.Server {
+	t.Helper()
+	var upstream *httptest.Server
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/registry/@example/widget":
+			metadataCalls.Add(1)
+			w.Header().Set("Content-Type", contentTypeJSON)
+			_, _ = fmt.Fprintf(w, `{"name":"@example/widget","time":{"1.0.0":%q},"versions":{"1.0.0":{"dist":{"tarball":%q}}}}`,
+				time.Now().Add(-30*24*time.Hour).Format(time.RFC3339), upstream.URL+"/registry/download/@example/widget/1.0.0/abc123?token=example")
+		case "/registry/download/@example/widget/1.0.0/abc123":
+			if r.URL.RawQuery != "token=example" {
+				t.Errorf("tarball query = %q", r.URL.RawQuery)
+			}
+			tarballCalls.Add(1)
+			_, _ = io.WriteString(w, "tarball bytes")
+		default:
+			t.Errorf("unexpected upstream request: %s", r.URL)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	return upstream
+}
+
+func TestNPMTarballMetadataFallback(t *testing.T) {
+	for _, body := range []string{`{"versions":{}}`, `{"versions":{"1.0.0":{"dist":{}}}}`, `not json`, "unavailable"} {
+		t.Run(body, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if body == "unavailable" {
+					w.WriteHeader(http.StatusServiceUnavailable)
+				}
+				_, _ = io.WriteString(w, body)
+			}))
+			t.Cleanup(upstream.Close)
+			p, _, _, fetcher := setupTestProxy(t)
+			p.CacheMetadata = true
+			p.MetadataTTL = time.Hour
+			fetcher.artifact = &fetch.Artifact{Body: io.NopCloser(strings.NewReader("package"))}
+			h := NewNPMHandler(p, "http://proxy.test", upstream.URL)
+			if body != "unavailable" {
+				if _, _, err := p.FetchOrCacheMetadata(t.Context(), "npm", "@example/widget", upstream.URL); err != nil {
+					t.Fatal(err)
+				}
+				upstream.Close()
+			}
+			response := httptest.NewRecorder()
+			h.Routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/@example/widget/-/widget-1.0.0.tgz", nil))
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+			}
+			if want := upstream.URL + "/@example/widget/-/widget-1.0.0.tgz"; fetcher.fetchedURL != want {
+				t.Errorf("fetched URL = %q, want %q", fetcher.fetchedURL, want)
+			}
+		})
+	}
+}
+
+func TestNPMTarballRejectsUnsafeMetadataURL(t *testing.T) {
+	for _, target := range []string{
+		"https://outside.invalid/package.tgz", "//outside.invalid/package.tgz", "/registry/package.tgz",
+		"UPSTREAM/outside/package.tgz", "UPSTREAM/registry-other/package.tgz",
+		"UPSTREAM/registry/../outside/package.tgz", "UPSTREAM/registry/%2e%2e/outside/package.tgz",
+		"UPSTREAM/registry/%252e%252e/outside/package.tgz", "UPSTREAM/registry/..%2foutside/package.tgz",
+		"UPSTREAM/registry/..%5coutside/package.tgz", "UPSTREAM/registry/package.tgz#fragment",
+		"USERINFO/registry/package.tgz", "SCHEME/registry/package.tgz",
+	} {
+		t.Run(target, func(t *testing.T) {
+			var upstream *httptest.Server
+			upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				address, _ := url.Parse(upstream.URL)
+				address.User = url.UserPassword("user", "secret")
+				tarball := strings.NewReplacer("UPSTREAM", upstream.URL, "USERINFO", address.String(), "SCHEME", strings.Replace(upstream.URL, "http:", "https:", 1)).Replace(target)
+				_ = json.NewEncoder(w).Encode(map[string]any{"versions": map[string]any{testVersion100: map[string]any{"dist": map[string]string{"tarball": tarball}}}})
+			}))
+			t.Cleanup(upstream.Close)
+			p, _, _, fetcher := setupTestProxy(t)
+			h := NewNPMHandler(p, "http://proxy.test", upstream.URL+"/registry")
+			response := httptest.NewRecorder()
+			h.Routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/widget/-/widget-1.0.0.tgz", nil))
+			if response.Code != http.StatusBadGateway || fetcher.fetchCalled {
+				t.Errorf("status = %d, fetched = %t; body: %s", response.Code, fetcher.fetchCalled, response.Body.String())
+			}
+		})
+	}
+}
