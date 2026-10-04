@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -315,6 +316,13 @@ func (h *NPMHandler) rewriteTarballURLs(versions map[string]any, packageName str
 		if idx := strings.LastIndex(tarball, "/"); idx >= 0 {
 			filename = tarball[idx+1:]
 		}
+		if h.extractVersionFromFilename(packageName, filename) != version {
+			_, shortName, scoped := strings.Cut(packageName, "/")
+			if !scoped {
+				shortName = packageName
+			}
+			filename = shortName + "-" + version + ".tgz"
+		}
 
 		escapedName := url.PathEscape(packageName)
 		newTarball := fmt.Sprintf("%s/npm/%s/-/%s", h.proxyURL, escapedName, filename)
@@ -377,22 +385,23 @@ func (h *NPMHandler) handleDownload(w http.ResponseWriter, r *http.Request) {
 	h.proxy.Logger.Info("npm download request",
 		"package", packageName, "version", version, "filename", filename)
 
-	if h.versionInCooldown(r, packageName, version) {
+	if h.proxy.versionDenied("npm", packageName, version) {
+		JSONError(w, http.StatusForbidden, ErrVersionDenied.Error()+": "+canonicalVersionPURL("npm", packageName, version))
+		return
+	}
+	metadata := sync.OnceValues(func() ([]byte, error) {
+		upstreamURL := h.upstreamURL + "/" + url.PathEscape(packageName)
+		body, _, err := h.proxy.FetchOrCacheMetadata(r.Context(), "npm", packageName, upstreamURL, contentTypeJSON)
+		return body, err
+	})
+	if h.versionInCooldown(packageName, version, metadata) {
 		h.proxy.Logger.Info("cooldown: withholding npm tarball",
 			"package", packageName, "version", version)
 		JSONError(w, http.StatusNotFound, "version not found")
 		return
 	}
 
-	downloadURL := fmt.Sprintf(
-		"%s/%s/-/%s",
-		h.upstreamURL,
-		escapeNPMDownloadPackage(packageName),
-		url.PathEscape(filename),
-	)
-	result, err := h.proxy.GetOrFetchArtifactFromURL(
-		r.Context(), "npm", packageName, version, filename, downloadURL,
-	)
+	result, err := h.getTarball(r, packageName, version, filename, metadata)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrUpstreamNotFound):
@@ -409,6 +418,60 @@ func (h *NPMHandler) handleDownload(w http.ResponseWriter, r *http.Request) {
 	ServeArtifactRequest(w, r, result)
 }
 
+func (h *NPMHandler) getTarball(r *http.Request, packageName, version, filename string, metadata func() ([]byte, error)) (*CacheResult, error) {
+	if cached, err := h.proxy.GetCachedArtifact(r.Context(), "npm", packageName, version, filename); err != nil || cached != nil {
+		return cached, err
+	}
+	downloadURL := fmt.Sprintf("%s/%s/-/%s", h.upstreamURL, escapeNPMDownloadPackage(packageName), url.PathEscape(filename))
+	body, err := metadata()
+	if err == nil {
+		if tarball := npmVersionTarball(body, version); tarball != "" {
+			downloadURL, err = h.validateTarballURL(tarball)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return h.proxy.GetOrFetchArtifactFromURL(r.Context(), "npm", packageName, version, filename, downloadURL)
+}
+
+func npmVersionTarball(body []byte, version string) string {
+	var metadata struct {
+		Versions map[string]struct {
+			Dist struct {
+				Tarball string `json:"tarball"`
+			} `json:"dist"`
+		} `json:"versions"`
+	}
+	if err := json.Unmarshal(body, &metadata); err != nil {
+		return ""
+	}
+	return metadata.Versions[version].Dist.Tarball
+}
+
+func (h *NPMHandler) validateTarballURL(raw string) (string, error) {
+	tarball, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("parsing npm tarball URL: %w", err)
+	}
+	upstream, err := url.Parse(h.upstreamURL)
+	if err != nil {
+		return "", fmt.Errorf("parsing npm upstream URL: %w", err)
+	}
+	if tarball.User != nil || tarball.Fragment != "" ||
+		tarball.Scheme != upstream.Scheme || !strings.EqualFold(tarball.Host, upstream.Host) {
+		return "", errors.New("npm tarball URL does not match upstream registry")
+	}
+	if containsPathTraversal(tarball.Path) || strings.Contains(tarball.Path, "\\") {
+		return "", errors.New("npm tarball URL contains path traversal")
+	}
+	basePath := strings.TrimRight(upstream.Path, "/")
+	if basePath != "" && !strings.HasPrefix(tarball.Path, basePath+"/") {
+		return "", errors.New("npm tarball URL is outside upstream base path")
+	}
+	return tarball.String(), nil
+}
+
 // versionInCooldown reports whether a version is still inside the cooldown
 // window. Filtering the packument is not enough on its own: tarball URLs are
 // predictable and lockfiles record them directly, so `npm ci` reaches the
@@ -420,7 +483,7 @@ func (h *NPMHandler) handleDownload(w http.ResponseWriter, r *http.Request) {
 // fetched and parsed at most once per version. A version with no usable
 // publish time is allowed through, matching how applyCooldownFiltering
 // treats it.
-func (h *NPMHandler) versionInCooldown(r *http.Request, packageName, version string) bool {
+func (h *NPMHandler) versionInCooldown(packageName, version string, metadata func() ([]byte, error)) bool {
 	if h.proxy.Cooldown == nil || !h.proxy.Cooldown.Enabled() {
 		return false
 	}
@@ -430,25 +493,23 @@ func (h *NPMHandler) versionInCooldown(r *http.Request, packageName, version str
 		return !h.proxy.Cooldown.IsAllowed("npm", canonicalPackagePURL("npm", packageName), ver.PublishedAt.Time)
 	}
 
-	upstreamURL := fmt.Sprintf("%s/%s", h.upstreamURL, url.PathEscape(packageName))
-
-	body, _, err := h.proxy.FetchOrCacheMetadata(r.Context(), "npm", packageName, upstreamURL, contentTypeJSON)
+	body, err := metadata()
 	if err != nil {
 		h.proxy.Logger.Warn("cooldown: could not fetch npm metadata for download check",
 			"package", packageName, "version", version, "error", err)
 		return false
 	}
 
-	var metadata struct {
+	var document struct {
 		Time map[string]string `json:"time"`
 	}
-	if err := json.Unmarshal(body, &metadata); err != nil {
+	if err := json.Unmarshal(body, &document); err != nil {
 		h.proxy.Logger.Warn("cooldown: could not parse npm metadata for download check",
 			"package", packageName, "version", version, "error", err)
 		return false
 	}
 
-	published, ok := metadata.Time[version]
+	published, ok := document.Time[version]
 	if !ok {
 		return false
 	}

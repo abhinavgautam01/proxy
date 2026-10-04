@@ -538,22 +538,13 @@ func TestNPMDownloadCooldown(t *testing.T) {
 }
 
 func TestNPMDownloadCooldownDisabled(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		t.Error("metadata must not be fetched when cooldown is disabled")
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer upstream.Close()
+	proxy, _, _, _ := setupTestProxy(t)
+	h := NewNPMHandler(proxy, "http://proxy.test", "")
 
-	proxy, _, _, fetcher := setupTestProxy(t)
-	proxy.HTTPClient = upstream.Client()
-	fetcher.artifact = &fetch.Artifact{
-		Body:        io.NopCloser(strings.NewReader("tarball data")),
-		ContentType: "application/octet-stream",
-	}
-
-	h := NewNPMHandler(proxy, "http://proxy.test", upstream.URL)
-
-	if h.versionInCooldown(httptest.NewRequest(http.MethodGet, "/", nil), "leftpad", testVersion100) {
+	if h.versionInCooldown("leftpad", testVersion100, func() ([]byte, error) {
+		t.Fatal("cooldown must not request metadata when disabled")
+		return nil, nil
+	}) {
 		t.Error("versionInCooldown = true, want false when cooldown is not configured")
 	}
 }
@@ -577,13 +568,10 @@ func TestNPMDownloadCooldownUsesStoredPublishTime(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			proxy, db, _, fetcher := setupTestProxy(t)
+			proxy, db, store, _ := setupTestProxy(t)
 			proxy.HTTPClient = upstream.Client()
 			proxy.Cooldown = &cooldown.Config{Default: "7d"}
-			fetcher.artifact = &fetch.Artifact{
-				Body:        io.NopCloser(strings.NewReader("tarball data")),
-				ContentType: "application/octet-stream",
-			}
+			seedPackage(t, db, store, "npm", "leftpad", tt.version, "leftpad-"+tt.version+".tgz", "tarball data")
 
 			if err := db.SetVersionPublishedAt("pkg:npm/leftpad@"+tt.version, "pkg:npm/leftpad", tt.publishedAt); err != nil {
 				t.Fatalf("seeding publish time failed: %v", err)
