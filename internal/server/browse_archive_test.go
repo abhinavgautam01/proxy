@@ -547,3 +547,134 @@ func drainBrowseFile(b *testing.B, extract func(string) (io.ReadCloser, error)) 
 	_, _ = io.Copy(io.Discard, rc)
 	_ = rc.Close()
 }
+
+// truncatedTar is a TAR whose only entry declares size bytes but carries just
+// body, ending without the rest of the entry or the end-of-archive marker.
+func truncatedTar(t testing.TB, name string, size int64, body []byte) []byte {
+	t.Helper()
+	buf := new(bytes.Buffer)
+	tw := tar.NewWriter(buf)
+	if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: size}); err != nil {
+		t.Fatalf("writing tar header: %v", err)
+	}
+	if _, err := tw.Write(body); err != nil {
+		t.Fatalf("writing tar body: %v", err)
+	}
+	// Deliberately not closed: tw.Close would fail on the short entry.
+	return buf.Bytes()
+}
+
+func TestBrowseFileReadErrorBeforeResponse(t *testing.T) {
+	complete := buildTar(t, []archiveEntry{{name: "package/data.txt", body: strings.Repeat("x", 4096)}})
+
+	tests := []struct {
+		name     string
+		filename string
+		data     []byte
+		limits   archives.StreamOptions
+		wantBody string
+	}{
+		{
+			name:     "truncated entry body",
+			filename: "short-1.0.0.tgz",
+			data:     gzipBytes(t, truncatedTar(t, "package/data.txt", 4096, []byte("abc"))),
+			wantBody: "failed to read file",
+		},
+		{
+			name:     "input limit inside entry",
+			filename: "short-1.0.0.tar",
+			data:     complete,
+			limits:   archives.StreamOptions{MaxInputBytes: 1024},
+			wantBody: "archive exceeds browse limits",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := newTestServer(t)
+			defer ts.close()
+			ts.server.browseLimits = tt.limits
+			cacheBrowseArtifact(t, ts, "npm", "short", tt.filename, tt.data)
+
+			w := browseGet(ts, browseFileURL("npm", "short", "data.txt"))
+			if w.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500 (body %q)", w.Code, w.Body.String())
+			}
+			if strings.Contains(w.Body.String(), "abc") || strings.Contains(w.Body.String(), "xxx") {
+				t.Errorf("error response leaked partial file content: %q", w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), tt.wantBody) {
+				t.Errorf("body = %q, want %q", w.Body.String(), tt.wantBody)
+			}
+		})
+	}
+}
+
+func TestBrowseFileReadErrorAfterResponseStarts(t *testing.T) {
+	const size = 4 * browsePrefetchSize
+	body := bytes.Repeat([]byte("0123456789abcdef"), size/16)
+	complete := buildTar(t, []archiveEntry{{name: "package/big.txt", body: string(body)}})
+
+	tests := []struct {
+		name     string
+		filename string
+		data     []byte
+		limits   archives.StreamOptions
+		wantErr  bool
+	}{
+		{
+			name:     "complete file",
+			filename: "big-1.0.0.tar",
+			data:     complete,
+		},
+		{
+			name:     "truncated entry body",
+			filename: "big-1.0.0.tgz",
+			data:     gzipBytes(t, truncatedTar(t, "package/big.txt", size, body[:size/2])),
+			wantErr:  true,
+		},
+		{
+			name:     "input limit inside entry",
+			filename: "big-1.0.0.tar",
+			data:     complete,
+			limits:   archives.StreamOptions{MaxInputBytes: size / 2},
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := newTestServer(t)
+			defer ts.close()
+			ts.server.browseLimits = tt.limits
+			cacheBrowseArtifact(t, ts, "npm", "big", tt.filename, tt.data)
+
+			srv := httptest.NewServer(ts.handler)
+			defer srv.Close()
+
+			resp, err := http.Get(srv.URL + browseFileURL("npm", "big", "big.txt"))
+			if err != nil {
+				if tt.wantErr {
+					return
+				}
+				t.Fatalf("GET: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			got, readErr := io.ReadAll(resp.Body)
+
+			if !tt.wantErr {
+				if resp.StatusCode != http.StatusOK || readErr != nil || !bytes.Equal(got, body) {
+					t.Fatalf("status %d, read error %v, %d of %d bytes", resp.StatusCode, readErr, len(got), len(body))
+				}
+				return
+			}
+			if readErr == nil {
+				t.Fatalf("status %d with %d of %d bytes and no read error; want an aborted response",
+					resp.StatusCode, len(got), len(body))
+			}
+			if len(got) >= len(body) {
+				t.Errorf("read %d bytes, want fewer than %d", len(got), len(body))
+			}
+		})
+	}
+}

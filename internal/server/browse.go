@@ -21,6 +21,9 @@ import (
 const (
 	contentTypePlainText = "text/plain; charset=utf-8"
 	browseSniffSize      = 512
+	// browsePrefetchSize is how much of a browsed file is read before the
+	// response starts. Read errors within it still produce an error status.
+	browsePrefetchSize = 64 << 10
 )
 
 // maxBrowseArchiveSize caps the compressed artifact size the browse and diff
@@ -375,13 +378,26 @@ func (s *Server) browseFile(w http.ResponseWriter, r *http.Request, ecosystem, n
 	}
 	defer func() { _ = fileReader.Close() }()
 
+	s.writeBrowseFile(w, fileReader, filePath, cachedArtifact.Filename)
+}
+
+// writeBrowseFile sends a file streamed from an archive. The start of the file
+// is read before any headers, so a truncated or over-limit entry that fails
+// there still gets an error status. A failure after the response has started
+// aborts it, so the client sees an incomplete download rather than a
+// successful one.
+func (s *Server) writeBrowseFile(w http.ResponseWriter, file io.Reader, filePath, artifactName string) {
+	source := &trackedReader{reader: file}
+	content := bufio.NewReaderSize(source, browsePrefetchSize)
+	head, err := content.Peek(browsePrefetchSize)
+	if err != nil && !errors.Is(err, io.EOF) {
+		s.browseReadError(w, err, filePath, artifactName)
+		return
+	}
+
 	contentType, knownPath := detectContentTypeFromPath(filePath)
-	var content io.Reader = fileReader
 	if !knownPath {
-		bufferedFile := bufio.NewReaderSize(fileReader, browseSniffSize)
-		prefix, _ := bufferedFile.Peek(browseSniffSize)
-		contentType = detectContentTypeFromPrefix(prefix)
-		content = bufferedFile
+		contentType = detectContentTypeFromPrefix(head[:min(len(head), browseSniffSize)])
 	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Security-Policy", "sandbox")
@@ -390,8 +406,43 @@ func (s *Server) browseFile(w http.ResponseWriter, r *http.Request, ecosystem, n
 	_, filename := path.Split(filePath)
 	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filename))
 
-	// Stream the file
-	_, _ = io.Copy(w, content)
+	written, err := io.Copy(w, content)
+	if err == nil || source.err == nil {
+		// A write error without a read error means the client went away.
+		return
+	}
+	s.logger.Error("failed to stream file from archive", "error", source.err,
+		"path", filePath, "filename", artifactName, "bytes", written)
+	// Headers are already committed: finishing normally would turn a truncated
+	// file into a seemingly successful download. Let net/http close the HTTP/1
+	// connection or reset the HTTP/2 stream instead.
+	panic(http.ErrAbortHandler)
+}
+
+// browseReadError reports a failure reading a file before its response starts.
+func (s *Server) browseReadError(w http.ResponseWriter, err error, filePath, artifactName string) {
+	if isBrowseLimitError(err) {
+		s.logger.Warn("archive exceeds browse limits", "error", err, "path", filePath, "filename", artifactName)
+		internalError(w, "archive exceeds browse limits")
+		return
+	}
+	s.logger.Error("failed to read file from archive", "error", err, "path", filePath, "filename", artifactName)
+	internalError(w, "failed to read file")
+}
+
+// trackedReader records the first read error other than io.EOF, so a failed
+// copy can be told apart from a failed write to the client.
+type trackedReader struct {
+	reader io.Reader
+	err    error
+}
+
+func (r *trackedReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) && r.err == nil {
+		r.err = err
+	}
+	return n, err
 }
 
 func detectContentTypeFromPath(filename string) (string, bool) {
