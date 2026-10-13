@@ -521,10 +521,28 @@ func (s *Server) updateCacheStatsMetrics() {
 
 	// Update once immediately
 	s.updateCacheStats()
+	s.updateMetadataCacheStats()
 
 	for range ticker.C {
 		s.updateCacheStats()
+		s.updateMetadataCacheStats()
 	}
+}
+
+// updateMetadataCacheStats republishes the metadata cache gauges. It runs
+// separately from updateCacheStats so a failure in one leaves the other's
+// gauges current.
+func (s *Server) updateMetadataCacheStats() {
+	stats, err := s.db.GetMetadataCacheStats()
+	if err != nil {
+		s.logger.Warn("failed to get metadata cache stats for metrics", "error", err)
+		return
+	}
+	out := make([]metrics.MetadataCacheStats, 0, len(stats))
+	for _, e := range stats {
+		out = append(out, metrics.MetadataCacheStats{Ecosystem: e.Ecosystem, Entries: e.Entries, Size: e.Size})
+	}
+	metrics.UpdateMetadataCacheStats(out)
 }
 
 func (s *Server) updateCacheStats() {
