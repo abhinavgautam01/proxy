@@ -19,6 +19,7 @@
 //   - /swift/*    - Swift Package Registry protocol
 //   - /v2/*       - OCI/Docker container registry protocol
 //   - /apk/*      - Alpine APK repository protocol
+//   - /arch/*     - Arch Linux pacman repository protocol
 //   - /debian/*   - Debian/APT repository protocol
 //   - /rpm/*      - RPM/Yum repository protocol
 //
@@ -121,6 +122,8 @@ type Server struct {
 
 	// browseLimits overrides defaultBrowseLimits when set; tests use it.
 	browseLimits archives.StreamOptions
+
+	compares compareLimiter
 }
 
 // New creates a new Server with the given configuration.
@@ -220,22 +223,10 @@ func (s *Server) Start(listeners ...net.Listener) error {
 }
 
 func (s *Server) serve(listener net.Listener) error {
-	// Use one authentication-aware transport for metadata and artifacts so
-	// configured credentials and cached OCI challenges apply consistently.
-	safeClient := newUpstreamClient(s.cfg.Upstream)
-	baseTransport := safeClient.Transport
-	if s.accessLog != nil {
-		baseTransport = upstreamhttp.NewAccessLogTransport(baseTransport, s.accessLog, s.logger)
-	}
-	authTransport := upstreamhttp.NewTransport(baseTransport, upstreamhttp.AuthFunc(s.authForURL))
-	metadataClient := *safeClient
-	metadataClient.Timeout = s.cfg.ParseHTTPTimeout()
-	metadataClient.Transport = authTransport
-	artifactClient := metadataClient
-	artifactClient.Timeout = serverWriteTimeout
+	metadataClient, artifactClient := s.newUpstreamClients(serverWriteTimeout)
 
 	// Create shared components with circuit breaker.
-	baseFetcher := fetch.NewFetcher(fetch.WithHTTPClient(&artifactClient))
+	baseFetcher := fetch.NewFetcher(fetch.WithHTTPClient(artifactClient))
 	fetcher := fetch.NewCircuitBreakerFetcher(baseFetcher)
 	s.breakers = newBreakerMonitor(fetcher, s.logger)
 	resolver := fetch.NewResolver()
@@ -244,9 +235,8 @@ func (s *Server) serve(listener net.Listener) error {
 		Ecosystems: s.cfg.Cooldown.Ecosystems,
 		Packages:   s.cfg.Cooldown.NormalizedPackages(),
 	}
-	proxy := handler.NewProxy(s.db, s.storage, fetcher, resolver, s.logger)
-	proxy.HTTPClient = &metadataClient
-	proxy.AuthForURL = s.authForURL
+	proxy := handler.NewProxy(s.db, s.storage, handler.LimitArtifactSize(fetcher, s.cfg.ParseArtifactMaxSize()), resolver, s.logger)
+	proxy.HTTPClient = metadataClient
 	cooldownPolicy, err := cooldownpolicy.New(cd, s.cfg.Cooldown.PackagePatterns)
 	if err != nil {
 		return fmt.Errorf("configuring cooldown policy: %w", err)
@@ -266,6 +256,9 @@ func (s *Server) serve(listener net.Listener) error {
 	proxy.MetadataMaxSize = s.cfg.ParseMetadataMaxSize()
 	proxy.SetMetadataRewriteCacheSize(s.cfg.ParseMetadataRewriteCacheSize())
 	proxy.GradleReadOnly = s.cfg.Gradle.BuildCache.ReadOnly
+	proxy.HostedEnabled = s.cfg.Hosted.Enabled
+	proxy.HostedNPMScopes = s.cfg.Hosted.NPMScopes
+	proxy.HostedComposerVendors = s.cfg.Hosted.ComposerVendors
 	proxy.NPMFullMetadata = s.cfg.Upstream.NPMFullMetadata
 	proxy.GradleMaxUploadSize = s.cfg.ParseGradleBuildCacheMaxUploadSize()
 	proxy.DirectServe = s.cfg.Storage.DirectServe
@@ -288,6 +281,11 @@ func (s *Server) serve(listener net.Listener) error {
 				defer metrics.DecrementActiveRequests()
 			}
 			next.ServeHTTP(w, r)
+		})
+	})
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r.WithContext(handler.DetachUpstreamFetch(r.Context())))
 		})
 	})
 
@@ -350,12 +348,19 @@ func (s *Server) serve(listener net.Listener) error {
 	// Mirror API endpoints (opt-in via mirror_api config or PROXY_MIRROR_API env)
 	if s.cfg.MirrorAPI {
 		mirrorSvc := mirror.New(proxy, s.db, s.storage, s.logger, 4) //nolint:mnd // default concurrency
+		mirrorSvc.Images = s.newContainerHandler(proxy)
 		jobStore := mirror.NewJobStore(bgCtx, mirrorSvc)
 		mirrorAPI := NewMirrorAPIHandler(jobStore)
 		r.Post("/api/mirror", mirrorAPI.HandleCreate)
 		r.Get("/api/mirror/{id}", mirrorAPI.HandleGet)
 		r.Delete("/api/mirror/{id}", mirrorAPI.HandleCancel)
 		go jobStore.StartCleanup(bgCtx)
+	}
+
+	// Hosted package endpoints (opt-in via hosted.enabled or PROXY_HOSTED_ENABLED)
+	if s.cfg.Hosted.Enabled {
+		hostedAPI := NewHostedAPIHandler(proxy, s.cfg.Hosted.MaxUploadBytes(), s.logger)
+		registerHostedRoutes(r, hostedAPI, s.cfg.Hosted.TokenExpanded())
 	}
 
 	s.http = &http.Server{
@@ -396,6 +401,7 @@ func (s *Server) mountProtocolHandlers(r chi.Router, proxy *handler.Proxy) {
 	)
 	gemHandler := handler.NewGemHandlerWithUpstream(proxy, s.cfg.BaseURL, s.cfg.Upstream.Gem)
 	goHandler := handler.NewGoHandlerWithUpstream(proxy, s.cfg.BaseURL, s.cfg.Upstream.Go)
+	goHandler.SetSumDBs(s.cfg.Upstream.GoSumDBs, s.cfg.Upstream.GoSumDBsOffline)
 	hexHandler := handler.NewHexHandlerWithUpstreams(
 		proxy,
 		s.cfg.BaseURL,
@@ -434,17 +440,11 @@ func (s *Server) mountProtocolHandlers(r chi.Router, proxy *handler.Proxy) {
 	juliaHandler := handler.NewJuliaHandlerWithUpstream(proxy, s.cfg.Upstream.Julia)
 	swiftHandler := handler.NewSwiftHandler(proxy, s.cfg.BaseURL, s.cfg.Upstream.Swift)
 	homebrewHandler := handler.NewHomebrewHandler(proxy, s.cfg.Upstream.HomebrewAPI)
-	containerHandler := handler.NewContainerHandlerWithRegistry(
-		proxy,
-		s.cfg.BaseURL,
-		s.cfg.Upstream.OCIDefault,
-		s.cfg.Upstream.OCI,
-	)
-	containerHandler.SetMirroredRegistries(s.cfg.Upstream.OCIMirrors)
-	handler.RegisterHomebrewArtifacts(containerHandler, s.cfg.Upstream.HomebrewArtifact)
+	containerHandler := s.newContainerHandler(proxy)
 	helmHandler := handler.NewHelmHandlerWithOCIRegistries(
 		proxy, s.cfg.BaseURL, s.cfg.Upstream.Helm, s.cfg.Upstream.OCIDefault, s.cfg.Upstream.OCI)
 	apkHandler := handler.NewAPKHandler(proxy, s.cfg.BaseURL, s.cfg.Upstream.APK)
+	archHandler := handler.NewArchHandler(proxy, s.cfg.BaseURL, s.cfg.Upstream.Arch)
 	debianHandler := handler.NewDebianHandler(
 		proxy,
 		s.cfg.BaseURL,
@@ -454,7 +454,7 @@ func (s *Server) mountProtocolHandlers(r chi.Router, proxy *handler.Proxy) {
 	rpmHandler := handler.NewRPMHandlerWithUpstream(proxy, s.cfg.BaseURL, s.cfg.Upstream.RPM)
 	genericHandler := handler.NewGenericHandler(proxy, s.cfg.Upstream.Generic, s.cfg.Upstream.GenericArtifacts)
 
-	r = r.With(rejectQueryInPath)
+	r = r.With(sandboxUpstreamContent, rejectQueryInPath)
 	r.Mount("/npm", http.StripPrefix("/npm", npmHandler.Routes()))
 	r.Mount("/cargo", http.StripPrefix("/cargo", cargoHandler.Routes()))
 	r.Mount("/gem", http.StripPrefix("/gem", gemHandler.Routes()))
@@ -475,6 +475,7 @@ func (s *Server) mountProtocolHandlers(r chi.Router, proxy *handler.Proxy) {
 	r.Mount("/v2", http.StripPrefix("/v2", containerHandler.Routes()))
 	r.Mount("/helm", http.StripPrefix("/helm", helmHandler.Routes()))
 	r.Mount("/apk", http.StripPrefix("/apk", apkHandler.Routes()))
+	r.Mount("/arch", http.StripPrefix("/arch", archHandler.Routes()))
 	r.Mount("/debian", http.StripPrefix("/debian", debianHandler.Routes()))
 	r.Mount("/rpm", http.StripPrefix("/rpm", rpmHandler.Routes()))
 	r.Mount("/generic", http.StripPrefix("/generic", genericHandler.Routes()))
@@ -483,6 +484,51 @@ func (s *Server) mountProtocolHandlers(r chi.Router, proxy *handler.Proxy) {
 // configureScanning builds the scanner group from cfg and wires it into
 // proxy, returning the group so the caller can decide whether to mount the
 // internal scan-fetch route.
+// newUpstreamClients builds the metadata and artifact clients. Both share one
+// authentication-aware transport so configured credentials and cached OCI
+// challenges apply consistently. An artifactTimeout of zero means no limit.
+func (s *Server) newUpstreamClients(artifactTimeout time.Duration) (metadataClient, artifactClient *http.Client) {
+	safeClient := newUpstreamClient(s.cfg.Upstream)
+	baseTransport := safeClient.Transport
+	if s.accessLog != nil {
+		baseTransport = upstreamhttp.NewAccessLogTransport(baseTransport, s.accessLog, s.logger)
+	}
+	authTransport := upstreamhttp.NewTransport(baseTransport, upstreamhttp.AuthFunc(s.authForURL))
+	metadata := *safeClient
+	metadata.Timeout = s.cfg.ParseHTTPTimeout()
+	metadata.Transport = authTransport
+	artifact := metadata
+	artifact.Timeout = artifactTimeout
+	return &metadata, &artifact
+}
+
+// NewMirrorProxy builds the proxy for the mirror command with the same
+// upstream clients, SSRF guard and upstream authentication as serve, and a
+// container handler with the same OCI routes for mirroring images. Artifact
+// downloads have no overall time limit; the caller cancels through ctx.
+func NewMirrorProxy(cfg *config.Config, db *database.DB, store storage.Storage, logger *slog.Logger) (*handler.Proxy, *handler.ContainerHandler) {
+	s := &Server{cfg: cfg, db: db, storage: store, logger: logger, ecr: newECRTokens(logger)}
+	metadataClient, artifactClient := s.newUpstreamClients(0)
+	fetcher := handler.LimitArtifactSize(fetch.NewFetcher(fetch.WithHTTPClient(artifactClient)), cfg.ParseArtifactMaxSize())
+	proxy := handler.NewProxy(db, store, fetcher, fetch.NewResolver(), logger)
+	proxy.HTTPClient = metadataClient
+	return proxy, s.newContainerHandler(proxy)
+}
+
+// newContainerHandler builds the OCI handler with the configured default
+// registry, named upstreams, mirrored registries and Homebrew routes.
+func (s *Server) newContainerHandler(proxy *handler.Proxy) *handler.ContainerHandler {
+	containerHandler := handler.NewContainerHandlerWithRegistry(
+		proxy,
+		s.cfg.BaseURL,
+		s.cfg.Upstream.OCIDefault,
+		s.cfg.Upstream.OCI,
+	)
+	containerHandler.SetMirroredRegistries(s.cfg.Upstream.OCIMirrors)
+	handler.RegisterHomebrewArtifacts(containerHandler, s.cfg.Upstream.HomebrewArtifact)
+	return containerHandler
+}
+
 func configureScanning(proxy *handler.Proxy, cfg config.ScanningConfig, baseURL string, logger *slog.Logger) (*scanner.Group, error) {
 	scanGroup, err := scanner.NewGroup(cfg, logger)
 	if err != nil {

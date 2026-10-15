@@ -21,6 +21,7 @@ See `config.example.yaml` in the repository root for a complete example.
 | `ui_base_url` | `PROXY_UI_URL` | - | (defaults to `base_url`) | Public URL where the web UI is reached. Set separately when the UI lives behind a different hostname than package endpoints (e.g. public domain vs Docker network alias). Used for canonical/og:url tags and the install guide banner. The proxy still serves package endpoints on the same listener, so any reverse proxy fronting the UI publicly should restrict the public route to `PathPrefix(/ui)` to avoid exposing package endpoints. |
 | `trust_forwarded_for` | `PROXY_TRUST_FORWARDED_FOR` | - | `false` | Attribute requests to the leftmost `X-Forwarded-For` entry instead of the TCP peer address, in the structured log, the access log and the request-source table on `/ui/analytics`. |
 | `ui_request_sources` | `PROXY_UI_REQUEST_SOURCES` | - | `false` | Show the request-source table on `/ui/analytics`, which reports caller addresses, the tool each ran and how much each pulled. |
+| `ui_failure_details` | `PROXY_UI_FAILURE_DETAILS` | - | `false` | List the latest failures behind each failure count on `/ui/analytics`: the package, its upstream URL or storage path, and the error. URLs are shown without credentials or query strings. |
 
 ## Storage
 
@@ -92,17 +93,17 @@ A package rule wins over an ecosystem rule, which wins over `default`. Package r
 | `cargo` | yes | `pkg:cargo/serde`, the crate name as published; case, `-` and `_` have to match, so `pkg:cargo/inflector` doesn't cover `Inflector`. |
 | `composer` | yes | `pkg:composer/symfony/console`; case doesn't matter. A key without a vendor is refused. |
 | `conan` | yes | `pkg:conan/zlib`, the recipe name; a rule covers every version, revision and user/channel of it. |
-| `conda` | no | - |
+| `conda` | yes | `pkg:conda/conda-forge/numpy`, with the channel as the namespace; the package name's case doesn't matter. A key without a channel is refused. |
 | `cran` | yes | `pkg:cran/ggplot2`, the package name as published, case included (`pkg:cran/Rcpp`). A rule covers source and binary builds alike. |
-| `deb` | no | - |
-| `gem` | no | - |
+| `deb` | yes | `pkg:deb/curl`; case doesn't matter. A vendor namespace such as `pkg:deb/debian/curl` is accepted and dropped, so a rule covers the package from every configured archive. Debian and Ubuntu archives only keep the current version per suite, so an evicted older one can't be fetched again. |
+| `gem` | yes | `pkg:gem/rails`, the gem name as published, case included. |
 | `golang` | yes | `pkg:golang/github.com/stretchr/testify`, the module path as in `go.mod`; case doesn't matter. A major version like `/v2` (or `.v3` on gopkg.in) is a module of its own and needs its own rule. The `!`-escaped form from proxy URLs and the module cache (`github.com/!azure/...`) is refused. |
 | `helm` | yes | No package rules: charts are cached per repository and digest, not under the chart name. The `helm` rule and `default` cover charts from HTTP repositories; charts pulled over OCI fall under `oci`. |
-| `hex` | no | - |
+| `hex` | yes | `pkg:hex/phoenix`, the package name as published. |
 | `julia` | yes | No package rules: a julia PURL needs a `uuid` qualifier, which the cache doesn't store. The `julia` rule and `default` cover package tarballs, artifacts and registry snapshots alike. |
 | `maven` | yes | `pkg:maven/com.google.guava/guava`, group and artifact as published, case included. Gradle build cache entries are not covered; they use `gradle.build_cache.max_age`. |
 | `npm` | yes | `pkg:npm/lodash`, `pkg:npm/@babel/core`; the name has to match exactly, case included, so `pkg:npm/jsonstream` doesn't cover `JSONStream`. |
-| `nuget` | no | - |
+| `nuget` | yes | `pkg:nuget/Newtonsoft.Json`; case doesn't matter. |
 | `oci` | yes | `pkg:oci/library/nginx`, the repository name of the pull. A named upstream keeps its prefix, also when containerd reaches it through `ns`: `ghcr.io/owner/app` pulled that way is `pkg:oci/upstream/ghcr/owner/app`. Homebrew bottles use Homebrew's image name, with `@` written as `/` and `+` as `x` (`openssl@3` is `pkg:oci/homebrew/core/openssl/3`). Helm charts pulled over OCI are stored like images. Only blobs are evicted; manifests stay in the metadata cache. |
 | `pub` | yes | `pkg:pub/http`, the package name as published. |
 | `pypi` | yes | `pkg:pypi/requests`; case and single `_`/`-` don't matter. Dots and repeated separators are kept as written, so a project like `zope.interface` can be stored as `zope.interface` and `zope-interface`; add a rule for each. |
@@ -236,6 +237,7 @@ Each upstream used by a built-in package route can be set in YAML or JSON under 
 | `upstream.cargo_download` | `PROXY_UPSTREAM_CARGO_DOWNLOAD` | `https://static.crates.io/crates` |
 | `upstream.gem` | `PROXY_UPSTREAM_GEM` | `https://rubygems.org` |
 | `upstream.go` | `PROXY_UPSTREAM_GO` | `https://proxy.golang.org` |
+| `upstream.go_sumdbs_offline` | `PROXY_UPSTREAM_GO_SUMDBS_OFFLINE` | `false` |
 | `upstream.hex` | `PROXY_UPSTREAM_HEX` | `https://repo.hex.pm` |
 | `upstream.hex_api` | `PROXY_UPSTREAM_HEX_API` | `https://hex.pm` |
 | `upstream.pub` | `PROXY_UPSTREAM_PUB` | `https://pub.dev` |
@@ -361,8 +363,18 @@ version-pinned GitHub release assets: they are stored in the artifact cache
 and served from it without revalidation, including while the upstream is
 down.
 
+Upstreams pointed at these hosts get version-pinned paths built in, whatever
+the upstream is named:
+
+| Upstream URL | Cached as artifacts | Package name |
+|---|---|---|
+| `https://archive.apache.org` | `dist/{project dirs}/{version}/[binaries/]{file}`, where `{version}` starts with a digit | the project dirs, e.g. `maven/maven-3`, `maven/mvnd` |
+| `https://nodejs.org` | `dist/v{version}/{file}` | the upstream name |
+| `https://dl.google.com/go` | `go{version}.{os}-{arch}.tar.gz`, `.zip` and their `.sha256` | the upstream name |
+
 Other upstreams can declare their own version-pinned paths in
-`generic_artifacts`. Each pattern is a regular expression that must match the
+`generic_artifacts`. These are tried before any built-in ones, so a configured
+pattern that overlaps a built-in decides the package name. Each pattern is a regular expression that must match the
 whole path after `/generic/{name}/`, with `version` and `file` named groups
 (single path segments) and an optional `name` group for the package name,
 which otherwise is the upstream name. Matching downloads are cached like
@@ -371,10 +383,10 @@ release assets and listed under the `generic` ecosystem:
 ```yaml
 upstream:
   generic:
-    apache: "https://archive.apache.org"
+    eclipse: "https://download.eclipse.org"
   generic_artifacts:
-    apache:
-      - 'dist/(?P<name>maven)/maven-3/(?P<version>[^/]+)/binaries/(?P<file>[^/]+)'
+    eclipse:
+      - 'jdtls/milestones/(?P<version>[^/]+)/(?P<file>[^/]+)'
 ```
 
 Only list paths whose content never changes for a given version: a match is
@@ -464,6 +476,83 @@ verification keeps working; `.apk` packages use the shared artifact cache.
 When `upstream.apk` is empty, a single repository named `alpine` pointing at
 the official mirror is available; configuring any entry replaces that default.
 
+```yaml
+upstream:
+
+  # Named Arch Linux pacman mirrors, served at /arch/{name}/.
+  arch:
+    archlinux: "https://geo.mirror.pkgbuild.com"
+```
+
+Arch Linux repositories are read-only. Requests to `/arch/{name}/…` are passed
+to the mirror unchanged, so both the Arch Linux layout
+(`/arch/archlinux/core/os/x86_64/core.db`) and the Arch Linux ARM layout
+(`/arch/archlinuxarm/aarch64/core/core.db`) work. Databases (`{repo}.db`,
+`{repo}.files` and their `.tar.*` forms) are cached with the metadata TTL and
+served byte-for-byte unchanged; a database's `.sig` is refreshed together with
+the database. Packages and package signatures use the shared artifact cache.
+When `upstream.arch` is empty, a single repository named `archlinux` pointing at
+`https://geo.mirror.pkgbuild.com` is available; configuring any entry replaces
+that default. Arch Linux ARM has no default: pick a regional HTTPS mirror, not
+the `mirror.archlinuxarm.org` redirector.
+
+### Go checksum database
+
+```yaml
+upstream:
+
+  # Named Go checksum databases, served at /go/sumdb/{name}/.
+  go_sumdbs:
+    sum.golang.org: "https://sum.golang.org"
+
+  # Keep answering for a database from its cached tree, however old, when
+  # the database cannot be reached. For networks where clients have no
+  # route to the database of their own. Requires cache_metadata.
+  go_sumdbs_offline: false
+```
+
+The `go` command asks `GOPROXY` for the checksum database before contacting it
+directly. The proxy answers for every name listed here and fetches lookups and
+tiles from the database's URL, not from `upstream.go`. Unknown names get 404,
+so the `go` command falls back to contacting that database itself. When
+`upstream.go_sumdbs` is empty, `sum.golang.org` is served; configuring any
+entry replaces that default.
+
+Once the proxy says it serves a database, the `go` command no longer contacts
+that database directly. The proxy therefore only says so when it can fetch the
+database's latest signed tree, or has a fresh one cached (fetched within
+`metadata_ttl`). If it cannot, it answers 404 as for an unknown name, and
+clients go to the database themselves, as they would without the proxy. The
+check waits five seconds at most, and after a failed check the proxy waits a
+minute before it tries the database again.
+
+Set `upstream.go_sumdbs_offline: true` when clients have no route to the
+database of their own. The proxy then keeps answering for it from the cached
+tree for as long as the outage lasts and serves cached lookups and tiles.
+That does not mean every cached module still verifies: the `go` command
+checks each lookup against tiles of the signed tree that came with it, the
+database attaches a different tree to almost every lookup, and a tile no
+client fetched through the proxy before cannot be served during the outage.
+Lookups for modules that were never cached fail as well. Builds whose
+`go.sum` already lists every module do not ask the database at all and are
+not affected. This requires `cache_metadata`.
+
+With `cache_metadata` enabled, lookups, partial hash tiles and the latest
+signed tree follow `metadata_ttl` and are served from cache when the database
+is unreachable. Complete hash tiles never change and are not revalidated once
+cached; a tile of the wrong size is refused and not stored. Data tiles are
+always forwarded and never stored: the `go` command does not fetch them, only
+mirrors and auditors do.
+Without `cache_metadata` the requests are forwarded and nothing is stored.
+
+A 404 from the database keeps its text, which the `go` command prints to
+explain why a version is missing. With `cache_metadata` enabled the text is
+cut at 4 KiB; without it the response is passed on unchanged.
+
+If `upstream.go` points at a module proxy that serves the checksum database
+itself, such as Athens, point the entry there instead, for example
+`sum.golang.org: "https://athens.example/sumdb/sum.golang.org"`.
+
 ### Debian archives
 
 ```yaml
@@ -498,6 +587,8 @@ This field has no environment variable, as with the other named upstream maps.
 Configure authentication for private upstream registries. The same authentication-aware client is used for metadata and artifact downloads, and credentials can reference environment variables using `${VAR_NAME}` syntax.
 
 OCI registries that return a Bearer challenge from a `/v2/{repository}/…` endpoint are handled automatically. The proxy discovers the token realm from `WWW-Authenticate`, applies any configured credentials for the token URL, and reuses the scoped token until shortly before it expires.
+
+A token fetched with credentials configured for the token URL is only fetched for, and sent to, a registry that is trusted with it: one with configured credentials of its own, or one on the same site (registrable domain) as the token service, as `registry-1.docker.io` is with `auth.docker.io`. Any other host that answers with a challenge naming that token service gets its 401 back, so it cannot obtain a token minted from your credentials. Tokens from a token service with no configured credentials are anonymous and are fetched for any registry, as before. If your registry and its token service are on different sites, configure credentials for the registry URL as well.
 
 ### Bearer Token
 
@@ -861,6 +952,16 @@ metadata_max_size: "100MB"   # default
 
 Or via environment variable: `PROXY_METADATA_MAX_SIZE=250MB`.
 
+### Artifact size limit
+
+Artifacts have no size limit by default. `artifact_max_size` refuses any artifact larger than the limit, so a client cannot fill storage or tie up the proxy by requesting huge downloads. An artifact whose upstream `Content-Length` is over the limit is refused before its body is read; one without a declared size fails once the download passes the limit. Either way nothing is cached and the client gets `502 Bad Gateway`, except when artifacts are streamed: one without a declared size has already started sending when it passes the limit, so the client sees the download cut off. The limit applies to `serve`, `mirror` and streamed artifacts.
+
+```yaml
+artifact_max_size: "2GB"   # default: unlimited ("" or "0")
+```
+
+Or via environment variable: `PROXY_ARTIFACT_MAX_SIZE=2GB`.
+
 ### Rewritten metadata cache
 
 The npm and Composer handlers rewrite every metadata document they serve, so that download URLs point at the proxy. That means decoding the whole document and encoding it again, and Composer's minified documents are also expanded, which together cost milliseconds per typical package and far more for very large ones. The proxy keeps rewritten documents in memory, so each distinct upstream document is rewritten once and requests arriving while it is being rewritten wait for that rewrite. New bytes from upstream are rewritten again. With version cooldown enabled the cache is bypassed, because cooldown filtering depends on the current time.
@@ -883,6 +984,93 @@ Or via environment variable: `PROXY_HTTP_TIMEOUT=2m`.
 
 Set to `"0"` to disable the timeout entirely (requests then rely only on the server's write timeout). Independently of this setting, the shared transport gives up on an upstream that has not sent response headers within 60 seconds.
 
+## Hosted Packages
+
+Operators can push a package archive into the proxy under a name and version. The proxy serves it in place of the upstream archive with the same version, or in addition to the upstream's versions. Use it to ship a patched build of a dependency without running a separate registry.
+
+The `/api/hosted` endpoints are disabled by default. Because a pushed version replaces the upstream one for every client, enabling them requires a token:
+
+```yaml
+hosted:
+  enabled: true
+  token: "${PROXY_HOSTED_TOKEN}"
+  max_upload_size: "100MB"
+  npm_scopes: ["@acme"]
+  composer_vendors: ["acme"]
+```
+
+| Config | Environment | Description |
+|--------|-------------|-------------|
+| `hosted.enabled` | `PROXY_HOSTED_ENABLED` | Register the `/api/hosted` endpoints (default `false`) |
+| `hosted.token` | `PROXY_HOSTED_TOKEN` | Bearer token required to push and delete; required when enabled, supports `${VAR}` |
+| `hosted.max_upload_size` | `PROXY_HOSTED_MAX_UPLOAD_SIZE` | Maximum size of one pushed archive (default `100MB`) |
+| `hosted.npm_scopes` | `PROXY_HOSTED_NPM_SCOPES` | npm scopes served from pushed packages only (comma-separated in the environment) |
+| `hosted.composer_vendors` | `PROXY_HOSTED_COMPOSER_VENDORS` | Composer vendors served from pushed packages only |
+
+`hosted.enabled` cannot be combined with `storage.cache_artifacts: false`.
+
+### Pushing a patched package
+
+1. Build the archive with the original package name and the version you push in its manifest (`package.json` or `composer.json`), e.g. `request-2.88.3.tgz`.
+2. Push it:
+
+   ```bash
+   export PROXY_HOSTED_TOKEN=...
+   proxy hosted push -url https://proxy.example.com npm request 2.88.3 ./request-2.88.3.tgz
+   ```
+
+   or with curl:
+
+   ```bash
+   curl -X PUT --data-binary @request-2.88.3.tgz \
+     -H "Authorization: Bearer $PROXY_HOSTED_TOKEN" \
+     https://proxy.example.com/api/hosted/npm/request/2.88.3
+   ```
+
+3. Install it as usual, e.g. `npm install request@2.88.3`. The version is listed in the package metadata, so ranges like `^2.88.0` resolve to it too.
+4. Check what is pushed: `proxy hosted list npm request` or `GET /api/hosted/npm/request`.
+5. Remove it again: `proxy hosted delete npm request 2.88.3` or `DELETE /api/hosted/npm/request/2.88.3`. If the upstream has the version, clients get the upstream archive again.
+
+### Supported ecosystems
+
+Download handlers look archives up by the filename clients request, so a push is stored under that name:
+
+| Ecosystem | Name | Filename |
+|-----------|------|----------|
+| `npm` | `{name}` or `@{scope}/{name}` | `{name}-{version}.tgz`, without the scope |
+| `composer` | `{vendor}/{package}` | `{package}-{version}.zip` |
+
+Other ecosystems are not supported yet.
+
+The archive must contain the package manifest: `package.json` in the top directory of an npm tarball, or `composer.json` at the root or in the single top directory of a Composer zip. Its name, and its version when it has one, must match the push. Otherwise the push is refused with 400.
+
+### Package metadata
+
+Pushed versions are listed in the package metadata clients resolve against, with the dependencies from their manifest:
+
+- A pushed version takes the place of an upstream version with the same number.
+- Pushed versions are added next to the upstream ones and are never held back by cooldown. npm `dist-tags` stay as the upstream has them.
+- A package the upstream doesn't know is served from its pushed versions alone. Its npm `latest` tag is the highest pushed version.
+- Pushed Composer dev versions (`dev-*`, `*-dev`) are listed in the `~dev` metadata file.
+- npm entries carry the archive's sha512 as `dist.integrity`. Composer entries carry its sha256 as `dist.reference` and leave `shasum` empty.
+
+Metadata of packages with pushed versions is rewritten on every request instead of being cached, so a push or delete shows up on the next request.
+
+### Hosted-only namespaces
+
+A package the upstream doesn't know is served from its pushed versions, but the proxy still asks the upstream about it on every request. If someone later publishes the same name there, their versions are listed next to yours, and a range such as `^1.0.0` can resolve to one of them (dependency confusion).
+
+For private packages:
+
+1. Prefer a namespace you own on the public registry: an npm scope registered on npmjs.com, or a Composer vendor with packages on Packagist. Nobody else can publish under it.
+2. List the namespace in `hosted.npm_scopes` or `hosted.composer_vendors`. Its packages are served from pushed versions alone: the upstream is never asked about them, and anything not pushed answers 404.
+
+Other packages, including ones in other scopes and vendors, are proxied as usual.
+
+### Storage and eviction
+
+Pushed archives are stored like cached ones but marked as local. The cache size limit and storage retention never remove them; only a delete does. Scanning, when enabled, checks pushed archives like fetched ones.
+
 ## Mirror API
 
 The `/api/mirror` endpoints are disabled by default. Enable them to allow starting mirror jobs via HTTP:
@@ -903,6 +1091,14 @@ curl -X POST http://localhost:8080/api/mirror \
   -d '{"sbom":{"bomFormat":"CycloneDX","components":[{"purl":"pkg:npm/lodash@4.17.21"}]}}'
 ```
 
+`platforms` limits which platforms of container images are mirrored, like the command's `--platform` flag:
+
+```bash
+curl -X POST http://localhost:8080/api/mirror \
+  -H "Content-Type: application/json" \
+  -d '{"purls":["pkg:docker/library/alpine@3.20"],"platforms":["linux/amd64"]}'
+```
+
 ## Mirror Command
 
 The `proxy mirror` command pre-populates the cache from various sources. It accepts the same storage and database flags as `serve`.
@@ -912,6 +1108,7 @@ The `proxy mirror` command pre-populates the cache from various sources. It acce
 | `--sbom` | | Path to CycloneDX or SPDX SBOM file |
 | `--concurrency` | `4` | Number of parallel downloads |
 | `--dry-run` | `false` | Show what would be mirrored without downloading |
+| `--platform` | | Comma-separated `os/arch[/variant]` list limiting which platforms of container images are mirrored |
 | `--config` | | Path to configuration file |
 | `--storage-url` | | Storage URL |
 | `--database-driver` | | Database driver |
@@ -923,6 +1120,24 @@ Positional arguments are treated as PURLs:
 ```bash
 proxy mirror pkg:npm/lodash@4.17.21 pkg:cargo/serde@1.0.0
 ```
+
+### Container images
+
+`pkg:docker` and `pkg:oci` PURLs mirror a container image the way a pull does: the manifest or index, the platform manifests, then config and layer blobs. Everything is stored under the keys a pull through `/v2` reads, so a later `docker pull` or containerd pull is served from cache, also when the upstream is unreachable.
+
+```bash
+proxy mirror --platform linux/amd64,linux/arm64 pkg:docker/library/alpine@3.20
+proxy mirror 'pkg:docker/containerd/alpine@3.14.0?repository_url=ghcr.io'
+proxy mirror 'pkg:oci/debian@sha256:...?repository_url=docker.io/library/debian&tag=bookworm'
+```
+
+- The version is a tag or a digest. Unversioned image PURLs fail; mirroring all tags is not supported.
+- Without `repository_url` the name is routed like a pull without containerd's `ns` parameter: the default OCI registry, repository prefix routes and `upstream/{name}/`. Single-segment Docker Hub names get the `library/` prefix.
+- `repository_url` is resolved like containerd's `ns` parameter, so it has to name the default registry, Docker Hub, a configured `upstream.oci` host or a host listed in `upstream.oci_mirrors`. Other hosts are refused.
+- `pkg:oci` needs `repository_url`. With `tag=` the tag is mirrored as well; if it now points to another digest, both are mirrored and a warning is logged. `arch=` limits the platforms when `--platform` is not given.
+- Without `--platform` every platform of an index is mirrored, including Windows images, which can be large. Attestation manifests of the selected platforms are mirrored too, because Docker fetches them on every pull.
+- Non-distributable (foreign) layers are skipped.
+- While `scanning.enabled` is set, the command refuses images, because scanners fetch staged layers from the running server. Use the mirror API instead.
 
 ## Docker
 

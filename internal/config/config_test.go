@@ -463,6 +463,7 @@ func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("PROXY_ACCESS_LOG_PATH", "/tmp/proxy-access.jsonl")
 	t.Setenv("PROXY_TRUST_FORWARDED_FOR", "true")
 	t.Setenv("PROXY_UI_REQUEST_SOURCES", "true")
+	t.Setenv("PROXY_UI_FAILURE_DETAILS", "true")
 	t.Setenv("PROXY_UPSTREAM_ALLOW_PRIVATE_HOSTS", "registry.internal, 10.0.0.12")
 	t.Setenv("PROXY_UPSTREAM_ALLOW_LOOPBACK", "true")
 	t.Setenv("PROXY_GRADLE_BUILD_CACHE_READ_ONLY", "true")
@@ -499,6 +500,9 @@ func TestLoadFromEnv(t *testing.T) {
 	}
 	if !cfg.UIRequestSources {
 		t.Error("UIRequestSources = false, want true from the environment")
+	}
+	if !cfg.UIFailureDetails {
+		t.Error("UIFailureDetails = false, want true from the environment")
 	}
 	if got := strings.Join(cfg.Upstream.AllowPrivateHosts, ","); got != "registry.internal,10.0.0.12" {
 		t.Errorf("Upstream.AllowPrivateHosts = %q, want %q", got, "registry.internal,10.0.0.12")
@@ -1364,11 +1368,15 @@ func TestValidateNamedUpstreams(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "valid Helm, OCI, APK, and generic upstreams",
+			name: "valid Helm, OCI, APK, Arch, and generic upstreams",
 			modify: func(cfg *Config) {
 				cfg.Upstream.Helm = map[string]string{"bitnami": "https://charts.bitnami.com/bitnami"}
 				cfg.Upstream.OCI = map[string]string{"ghcr": "https://ghcr.io"}
 				cfg.Upstream.APK = map[string]string{"alpine": "https://dl-cdn.alpinelinux.org/alpine"}
+				cfg.Upstream.Arch = map[string]string{
+					"archlinux":    "https://geo.mirror.pkgbuild.com",
+					"archlinuxarm": "https://de3.mirror.archlinuxarm.org",
+				}
 				cfg.Upstream.Generic = map[string]string{
 					"github":     "https://github.com",
 					"github-api": "https://api.github.com",
@@ -1530,6 +1538,20 @@ func TestValidateNamedUpstreams(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "Arch upstream name contains path separator",
+			modify: func(cfg *Config) {
+				cfg.Upstream.Arch = map[string]string{"arch/linux": "https://geo.mirror.pkgbuild.com"}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Arch upstream URL is not absolute",
+			modify: func(cfg *Config) {
+				cfg.Upstream.Arch = map[string]string{"archlinux": "geo.mirror.pkgbuild.com"}
+			},
+			wantErr: true,
+		},
+		{
 			name: "valid Debian repository",
 			modify: func(cfg *Config) {
 				cfg.Upstream.DebianRepositories = map[string]string{
@@ -1575,6 +1597,61 @@ func TestValidateNamedUpstreams(t *testing.T) {
 				cfg.Upstream.DebianRepositories = map[string]string{"dists": "https://security.debian.org"}
 			},
 			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			tt.modify(cfg)
+			err := cfg.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateGoSumDBs(t *testing.T) {
+	tests := []struct {
+		name    string
+		modify  func(*Config)
+		wantErr bool
+	}{
+		{
+			name: "valid Go checksum database",
+			modify: func(cfg *Config) {
+				cfg.Upstream.GoSumDBs = map[string]string{"sum.golang.org": "https://sum.golang.org"}
+			},
+		},
+		{
+			name: "Go checksum database name contains path separator",
+			modify: func(cfg *Config) {
+				cfg.Upstream.GoSumDBs = map[string]string{"sum.golang.org/x": "https://sum.golang.org"}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Go checksum database URL is not absolute",
+			modify: func(cfg *Config) {
+				cfg.Upstream.GoSumDBs = map[string]string{"sum.golang.org": "sum.golang.org"}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Go checksum database offline mode requires metadata caching",
+			modify: func(cfg *Config) {
+				cfg.CacheMetadata = false
+				cfg.Upstream.GoSumDBsOffline = true
+			},
+			wantErr: true,
+		},
+		{
+			name: "Go checksum database offline mode with metadata caching",
+			modify: func(cfg *Config) {
+				cfg.CacheMetadata = true
+				cfg.Upstream.GoSumDBsOffline = true
+			},
 		},
 	}
 
@@ -1645,5 +1722,54 @@ func TestLoadCacheArtifactsFromEnv(t *testing.T) {
 
 	if cfg.Storage.CacheArtifacts {
 		t.Error("Storage.CacheArtifacts should be false")
+	}
+}
+
+func TestParseArtifactMaxSize(t *testing.T) {
+	tests := []struct {
+		name string
+		size string
+		want int64
+	}{
+		{"unset is unlimited", "", 0},
+		{"zero is unlimited", "0", 0},
+		{"explicit value", "2GB", 2 << 30},
+		{"bytes", "1024", 1024},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.ArtifactMaxSize = tt.size
+			if got := cfg.ParseArtifactMaxSize(); got != tt.want {
+				t.Errorf("ParseArtifactMaxSize() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateArtifactMaxSize(t *testing.T) {
+	for _, invalid := range []string{"not-a-size", "-1"} {
+		cfg := Default()
+		cfg.ArtifactMaxSize = invalid
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("expected validation error for artifact_max_size %q", invalid)
+		}
+	}
+	for _, valid := range []string{"", "0", "2GB"} {
+		cfg := Default()
+		cfg.ArtifactMaxSize = valid
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("unexpected error for artifact_max_size %q: %v", valid, err)
+		}
+	}
+}
+
+func TestLoadArtifactMaxSizeFromEnv(t *testing.T) {
+	cfg := Default()
+	t.Setenv("PROXY_ARTIFACT_MAX_SIZE", "2GB")
+	cfg.LoadFromEnv()
+
+	if cfg.ArtifactMaxSize != "2GB" {
+		t.Errorf("ArtifactMaxSize = %q, want %q", cfg.ArtifactMaxSize, "2GB")
 	}
 }

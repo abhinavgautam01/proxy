@@ -5,6 +5,11 @@
 // @description HTTP API for package enrichment, vulnerability lookup, cache stats, and source browsing.
 // @BasePath /
 //
+// @securityDefinitions.apikey BearerAuth
+// @in header
+// @name Authorization
+// @description "Bearer " followed by hosted.token
+//
 // The proxy caches package artifacts from upstream registries (npm, cargo, etc.)
 // providing faster, more reliable access for development teams.
 //
@@ -17,6 +22,7 @@
 //	serve    Start the proxy server (default if no command given)
 //	stats    Show cache statistics
 //	mirror   Pre-populate cache from PURLs, SBOMs, or registries
+//	hosted   Push, list or delete packages on a running proxy (needs hosted.enabled)
 //
 // Serve Flags:
 //
@@ -82,6 +88,12 @@
 //	PROXY_GRADLE_BUILD_CACHE_MAX_SIZE        - Gradle cache max total size
 //	PROXY_GRADLE_BUILD_CACHE_SWEEP_INTERVAL  - Gradle cache eviction sweep interval
 //	PROXY_HEALTH_STORAGE_PROBE_INTERVAL      - Storage health probe cache interval (default "30s")
+//	PROXY_HOSTED_ENABLED                     - Enable pushing packages to /api/hosted
+//	PROXY_HOSTED_TOKEN                       - Bearer token for pushing and deleting
+//	PROXY_HOSTED_MAX_UPLOAD_SIZE             - Max size of one pushed archive (default "100MB")
+//	PROXY_HOSTED_NPM_SCOPES                  - npm scopes served from pushed packages only
+//	PROXY_HOSTED_COMPOSER_VENDORS            - Composer vendors served from pushed packages only
+//	PROXY_URL                                - Proxy URL for proxy hosted
 //
 // Example:
 //
@@ -113,11 +125,9 @@ import (
 	"github.com/git-pkgs/proxy/internal/config"
 	"github.com/git-pkgs/proxy/internal/database"
 	"github.com/git-pkgs/proxy/internal/denylist"
-	"github.com/git-pkgs/proxy/internal/handler"
 	"github.com/git-pkgs/proxy/internal/mirror"
 	"github.com/git-pkgs/proxy/internal/server"
 	"github.com/git-pkgs/proxy/internal/storage"
-	"github.com/git-pkgs/registries/fetch"
 )
 
 const defaultTopN = 10
@@ -154,6 +164,10 @@ func main() {
 			os.Args = append(os.Args[:1], os.Args[2:]...)
 			runMirror()
 			return
+		case "hosted":
+			os.Args = append(os.Args[:1], os.Args[2:]...)
+			runHostedCommand()
+			return
 		case "-version", "--version":
 			fmt.Printf("proxy %s (%s)\n", Version, Commit)
 			os.Exit(0)
@@ -176,6 +190,7 @@ Commands:
   serve    Start the proxy server (default)
   stats    Show cache statistics
   mirror   Pre-populate cache from PURLs, SBOMs, or registries
+  hosted   Push, list or delete packages on a running proxy
 
 Run 'proxy <command> -help' for more information on a command.
 
@@ -421,6 +436,7 @@ func runMirror() {
 	sbomPath := fs.String("sbom", "", "Path to CycloneDX or SPDX SBOM file")
 	concurrency := fs.Int("concurrency", 4, "Number of parallel downloads") //nolint:mnd // default concurrency
 	dryRun := fs.Bool("dry-run", false, "Show what would be mirrored without downloading")
+	platforms := fs.String("platform", "", "Comma-separated os/arch[/variant] list limiting which platforms of container images are mirrored")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "git-pkgs proxy - Pre-populate cache\n\n")
@@ -428,13 +444,22 @@ func runMirror() {
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  proxy mirror pkg:npm/lodash@4.17.21\n")
 		fmt.Fprintf(os.Stderr, "  proxy mirror --sbom sbom.cdx.json\n")
-		fmt.Fprintf(os.Stderr, "  proxy mirror pkg:npm/lodash  # all versions\n\n")
+		fmt.Fprintf(os.Stderr, "  proxy mirror pkg:npm/lodash  # all versions\n")
+		fmt.Fprintf(os.Stderr, "  proxy mirror --platform linux/amd64 pkg:docker/library/alpine@3.20\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fs.PrintDefaults()
 	}
 
 	_ = fs.Parse(os.Args[1:])
 	purls := fs.Args()
+	var platformList []string
+	if *platforms != "" {
+		platformList = []string{*platforms}
+	}
+	if _, err := mirror.ParsePlatforms(platformList); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Determine source
 	var source mirror.Source
@@ -445,9 +470,9 @@ func runMirror() {
 			fmt.Fprintf(os.Stderr, "error reading SBOM %s: %v\n", *sbomPath, err)
 			os.Exit(1)
 		}
-		source = &mirror.SBOMSource{Data: data, Name: *sbomPath}
+		source = &mirror.SBOMSource{Data: data, Name: *sbomPath, Platforms: platformList}
 	case len(purls) > 0:
-		source = &mirror.PURLSource{PURLs: purls}
+		source = &mirror.PURLSource{PURLs: purls, Platforms: platformList}
 	default:
 		fmt.Fprintf(os.Stderr, "error: provide PURLs or --sbom\n")
 		fs.Usage()
@@ -518,10 +543,8 @@ func runMirror() {
 		os.Exit(1) //nolint:gocritic // db closed above
 	}
 
-	// Build proxy (reuses same pipeline as serve)
-	fetcher := fetch.NewFetcher()
-	resolver := fetch.NewResolver()
-	proxy := handler.NewProxy(db, store, fetcher, resolver, logger)
+	// Build proxy with the same upstream clients and authentication as serve
+	proxy, images := server.NewMirrorProxy(cfg, db, store, logger)
 	proxy.Denylist, err = denylist.New(cfg.Denylist.Packages)
 	if err != nil {
 		_ = db.Close()
@@ -533,6 +556,12 @@ func runMirror() {
 	proxy.MetadataMaxSize = cfg.ParseMetadataMaxSize()
 
 	m := mirror.New(proxy, db, store, logger, *concurrency)
+	m.Images = images
+	if cfg.Scanning.Enabled {
+		// Scanners fetch staged layers from the running server, which this
+		// command does not start.
+		m.Images = mirror.UnavailableImages{Reason: "container images cannot be mirrored by this command while scanning is enabled; use the mirror API of the running server"}
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {

@@ -14,6 +14,10 @@ base_url: "http://localhost:8080"
 # Set to "0" to disable the timeout. Default: "30s".
 # http_timeout: "30s"
 
+# Largest upstream artifact to fetch (e.g. "2GB"). Larger ones are refused
+# and not cached. Default: unlimited.
+# artifact_max_size: ""
+
 # Memory for rewritten npm and Composer metadata, so each upstream document is
 # rewritten once rather than on every request. Set to "0" to rewrite on every
 # request. Default: "256MB".
@@ -41,6 +45,13 @@ base_url: "http://localhost:8080"
 # unless /ui is gated by a reverse proxy; anyone who can reach the page can
 # otherwise read the addresses of your build fleet.
 # ui_request_sources: false
+
+# List the latest failures behind each failure count on /ui/analytics (upstream,
+# storage, integrity, health probe and scan errors): the package, its upstream
+# URL or storage path, and the error. URLs lose credentials and query strings.
+#
+# Off by default, for the same reason as ui_request_sources.
+# ui_failure_details: false
 
 # Artifact storage configuration
 storage:
@@ -267,6 +278,15 @@ upstream:
   #   alpine: "https://dl-cdn.alpinelinux.org/alpine"
   #   private: "https://apk.example.com"
 
+  # Named Arch Linux pacman mirrors (used by /arch/{name}/).
+  # Defaults to {"archlinux": "https://geo.mirror.pkgbuild.com"} when empty;
+  # configuring any entry replaces that default. Arch Linux ARM needs a
+  # regional HTTPS mirror of your choice, not the mirror.archlinuxarm.org
+  # redirector.
+  # arch:
+  #   archlinux: "https://geo.mirror.pkgbuild.com"
+  #   archlinuxarm: "https://<region>.mirror.archlinuxarm.org"
+
   # Named generic HTTP upstreams (used by /generic/{name}/). The remaining
   # request path and query are appended to the upstream URL. GitHub release
   # assets ({owner}/{repo}/releases/download/{tag}/{asset}) are cached
@@ -343,6 +363,18 @@ gradle:
 
     # How often eviction runs when max_age or max_size is set
     sweep_interval: "10m"
+
+# Pushing package archives to /api/hosted (disabled by default).
+# A pushed version replaces the upstream one for every client, so a token is
+# required to push and delete.
+# hosted:
+#   enabled: true
+#   token: "${PROXY_HOSTED_TOKEN}"
+#   max_upload_size: "100MB"
+#   # Namespaces served from pushed packages only; the upstream is never asked
+#   # about them, so nobody can mix in versions by publishing the same name.
+#   npm_scopes: ["@acme"]
+#   composer_vendors: ["acme"]
 
 # Health endpoint configuration.
 health:

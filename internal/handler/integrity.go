@@ -10,6 +10,10 @@ import (
 type integrityChecks struct {
 	contentHash integrity.SRI
 	native      integrity.SRI
+	// checksum is native metadata given as a single algorithm-prefixed hex
+	// checksum, such as a registry's SHA-1 shasum, which is not SRI.
+	checksum    integrity.Digest
+	hasChecksum bool
 	algorithms  []integrity.Algorithm
 }
 
@@ -28,7 +32,13 @@ func newIntegrityChecks(contentHash, native string) (integrityChecks, error) {
 	if native != "" {
 		digests, err := integrity.ParseSRI(native)
 		if err != nil {
-			return integrityChecks{}, fmt.Errorf("parse integrity: %w", err)
+			checksum, checksumErr := integrity.ParseChecksum(native)
+			if checksumErr != nil {
+				return integrityChecks{}, fmt.Errorf("parse integrity: %w", err)
+			}
+			checks.checksum, checks.hasChecksum = checksum, true
+			checks.algorithms = append(checks.algorithms, checksum.Algorithm())
+			return checks, nil
 		}
 		checks.native = digests
 		for _, digest := range digests {
@@ -37,6 +47,35 @@ func newIntegrityChecks(contentHash, native string) (integrityChecks, error) {
 	}
 
 	return checks, nil
+}
+
+// verifyIntegrity wraps body to check it against the declared integrity as
+// it is read. verified, called once body has been read, reports a mismatch as
+// ErrArtifactDigestMismatch, and also a body that was not read to its end,
+// since only a complete body can be checked. An empty declared checks
+// nothing.
+func verifyIntegrity(body io.ReadCloser, declared string) (_ io.Reader, verified func() error, _ error) {
+	if declared == "" {
+		return body, func() error { return nil }, nil
+	}
+	checks, err := newIntegrityChecks("", declared)
+	if err != nil {
+		return nil, nil, err
+	}
+	var mismatch string
+	reader, err := checks.newVerifyingReader(body, func(reason string) { mismatch = reason }, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	return reader, func() error {
+		if !reader.(*verifyingReader).verified {
+			return fmt.Errorf("%w: body was not read to its end", ErrArtifactDigestMismatch)
+		}
+		if mismatch != "" {
+			return fmt.Errorf("%w: %s", ErrArtifactDigestMismatch, mismatch)
+		}
+		return nil
+	}, nil
 }
 
 func (c integrityChecks) wrap(source io.ReadCloser, onMismatch func(string)) (io.ReadCloser, error) {
@@ -160,4 +199,24 @@ func (r *verifyingReader) verify() {
 			r.onMismatch("integrity: " + err.Error())
 		}
 	}
+	if r.checks.hasChecksum {
+		if err := result.VerifyDigest(r.checks.checksum); err != nil {
+			r.mismatched = true
+			r.onMismatch("integrity: " + err.Error())
+		}
+	}
+}
+
+// sha1Checksum returns a registry's hexadecimal SHA-1 shasum as the
+// "sha1-<hex>" checksum newIntegrityChecks accepts, or "" when it is empty or
+// not a SHA-1 digest.
+func sha1Checksum(shasum string) string {
+	if shasum == "" {
+		return ""
+	}
+	digest, err := integrity.ParseHex(integrity.SHA1, shasum)
+	if err != nil {
+		return ""
+	}
+	return digest.Checksum()
 }
