@@ -334,3 +334,37 @@ func TestMetadataCacheView(t *testing.T) {
 		t.Errorf("empty view = %+v", empty)
 	}
 }
+
+// The page reads the metadata card from the snapshot the gauges publish, so a
+// page load issues no query of its own and the two always agree.
+func TestAnalyticsPageMetadataCardUsesSnapshot(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.close()
+	ts.server.cfg.CacheMetadata = true
+
+	seed := func(name string, size int64) {
+		t.Helper()
+		if err := ts.db.UpsertMetadataCache(&database.MetadataCacheEntry{
+			Ecosystem: "pypi", Name: name, StoragePath: "_metadata/pypi/" + name,
+			Size: sql.NullInt64{Int64: size, Valid: true},
+		}); err != nil {
+			t.Fatalf("UpsertMetadataCache: %v", err)
+		}
+	}
+
+	seed("requests", 1<<10)
+	ts.server.updateMetadataCacheStats()
+	if !strings.Contains(ts.getOK(t, "/ui/analytics"), "1.0 KB") {
+		t.Fatal("page did not show the snapshot the metrics tick read")
+	}
+
+	seed("urllib3", 2<<10)
+	if body := ts.getOK(t, "/ui/analytics"); !strings.Contains(body, "1.0 KB") || strings.Contains(body, "3.0 KB") {
+		t.Error("a page load re-queried the database instead of serving the snapshot")
+	}
+
+	ts.server.updateMetadataCacheStats()
+	if !strings.Contains(ts.getOK(t, "/ui/analytics"), "3.0 KB") {
+		t.Error("page did not pick up the refreshed snapshot")
+	}
+}

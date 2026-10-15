@@ -118,6 +118,7 @@ type Server struct {
 	ecr         *ecrTokens
 	breakers    *breakerMonitor
 	ecoStats    ecosystemStatsCache
+	metaStats   metadataStatsCache
 	sources     sourceTracker
 
 	// browseLimits overrides defaultBrowseLimits when set; tests use it.
@@ -575,11 +576,11 @@ func (s *Server) updateCacheStatsMetrics() {
 	}
 }
 
-// updateMetadataCacheStats republishes the metadata cache gauges. It runs
-// separately from updateCacheStats so a failure in one leaves the other's
-// gauges current.
+// updateMetadataCacheStats republishes the metadata cache gauges from a fresh
+// read of the snapshot the analytics page also serves. It runs separately
+// from updateCacheStats so a failure in one leaves the other's gauges current.
 func (s *Server) updateMetadataCacheStats() {
-	stats, err := s.db.GetMetadataCacheStats()
+	stats, err := s.metaStats.Refresh(s.db)
 	if err != nil {
 		s.logger.Warn("failed to get metadata cache stats for metrics", "error", err)
 		return

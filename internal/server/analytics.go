@@ -214,7 +214,10 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	data.Totals, data.Ecosystems = analyticsView(ecosystems)
 	data.Donut = donutView(ecosystems, data.Totals.DownloadedBytes, data.Totals.Downloaded)
 
-	metadataStats, err := s.db.GetMetadataCacheStats()
+	// The same 60-second snapshot the metadata cache gauges are published
+	// from, so a page load costs no query of its own. A failed read keeps the
+	// last good rows, which the card shows in preference to the error.
+	metadataStats, err := s.metaStats.Get(s.db)
 	if err != nil {
 		s.logger.Error("failed to get metadata cache stats", "error", err)
 	}
