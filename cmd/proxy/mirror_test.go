@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,13 +37,23 @@ func writeScanningMirrorConfig(t *testing.T, dir string) string {
 	return path
 }
 
-func runMirrorProcess(t *testing.T, args ...string) string {
+// runMirrorProcess runs proxy mirror with args in a helper process and
+// checks that it exits with wantCode.
+func runMirrorProcess(t *testing.T, wantCode int, args ...string) string {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestMirrorHelperProcess$")
 	cmd.Env = append(os.Environ(), mirrorTestEnv+"="+strings.Join(args, "\n"))
 	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("proxy mirror %v failed: %v\n%s", args, err, output)
+
+	code := 0
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		code = exitErr.ExitCode()
+	} else if err != nil {
+		t.Fatalf("proxy mirror %v: %v\n%s", args, err, output)
+	}
+	if code != wantCode {
+		t.Fatalf("proxy mirror %v exited with status %d, want %d\n%s", args, code, wantCode, output)
 	}
 	return string(output)
 }
@@ -50,11 +61,12 @@ func runMirrorProcess(t *testing.T, args ...string) string {
 // With scanning enabled, proxy mirror refuses packages rather than caching
 // them unscanned: scanners fetch staged bytes from the running server, which
 // the command does not start.
+// A refused package counts as failed, so the command exits 1.
 func TestMirrorCommandRefusesPackagesWhileScanning(t *testing.T) {
 	dir := t.TempDir()
 	configPath := writeScanningMirrorConfig(t, dir)
 
-	output := runMirrorProcess(t, "-config", configPath, "pkg:npm/lodash@4.17.21")
+	output := runMirrorProcess(t, 1, "-config", configPath, "pkg:npm/lodash@4.17.21")
 
 	for _, want := range []string{mirrorScanningPackagesReason, "0 downloaded", "1 failed"} {
 		if !strings.Contains(output, want) {
@@ -91,7 +103,7 @@ func TestMirrorCommandRefusesPackagesWhileScanning(t *testing.T) {
 func TestMirrorCommandDryRunWhileScanning(t *testing.T) {
 	configPath := writeScanningMirrorConfig(t, t.TempDir())
 
-	output := runMirrorProcess(t, "-config", configPath, "-dry-run", "pkg:npm/lodash@4.17.21")
+	output := runMirrorProcess(t, 0, "-config", configPath, "-dry-run", "pkg:npm/lodash@4.17.21")
 
 	if !strings.Contains(output, "Would mirror 1 package versions") {
 		t.Errorf("dry run output:\n%s", output)
@@ -120,5 +132,67 @@ func TestMirrorHelperProcess(*testing.T) {
 		return
 	}
 	os.Args = append([]string{"proxy", "mirror"}, strings.Split(args, "\n")...)
+	main()
+}
+
+func TestMirrorExitCode(t *testing.T) {
+	tests := []struct {
+		name     string
+		progress *mirror.Progress
+		want     int
+	}{
+		{"nil progress", nil, 0},
+		{"everything mirrored", &mirror.Progress{Total: 2, Completed: 2}, 0},
+		{"everything cached", &mirror.Progress{Total: 2, Skipped: 2}, 0},
+		{"one failure", &mirror.Progress{Total: 2, Completed: 1, Failed: 1}, 1},
+		{"all failed", &mirror.Progress{Total: 3, Failed: 3}, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := mirrorExitCode(tt.progress); got != tt.want {
+				t.Errorf("mirrorExitCode() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// proxy mirror used to exit 0 after printing "N failed", so a CI step that
+// prewarms the cache passed even when every download failed (#500). An
+// ecosystem the resolver rejects fails without touching the network.
+func TestMirrorExitsNonZeroWhenDownloadsFail(t *testing.T) {
+	dir := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMirrorFailureProcess$")
+	cmd.Env = append(os.Environ(),
+		"PROXY_TEST_MIRROR_FAILURE=1",
+		"PROXY_TEST_MIRROR_DIR="+dir,
+	)
+	output, err := cmd.CombinedOutput()
+
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("mirror with a failed download exited with %v, want status 1\n%s", err, output)
+	}
+	if code := exitErr.ExitCode(); code != 1 {
+		t.Fatalf("exit status = %d, want 1\n%s", code, output)
+	}
+	if !strings.Contains(string(output), "1 failed") {
+		t.Errorf("output does not report the failure:\n%s", output)
+	}
+	if !strings.Contains(string(output), "bogus/foo@1.0.0") {
+		t.Errorf("output does not list the failed package:\n%s", output)
+	}
+}
+
+func TestMirrorFailureProcess(*testing.T) {
+	if os.Getenv("PROXY_TEST_MIRROR_FAILURE") != "1" {
+		return
+	}
+	dir := os.Getenv("PROXY_TEST_MIRROR_DIR")
+	os.Args = []string{
+		"proxy", "mirror",
+		"--storage-url", "file://" + filepath.Join(dir, "store"),
+		"--database-path", filepath.Join(dir, "cache.db"),
+		"pkg:bogus/foo@1.0.0",
+	}
 	main()
 }

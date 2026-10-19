@@ -190,6 +190,9 @@ type Config struct {
 	// Disabled by default to prevent unauthenticated users from triggering downloads.
 	MirrorAPI bool `json:"mirror_api" yaml:"mirror_api"`
 
+	// Mirror configures scheduled mirroring.
+	Mirror MirrorConfig `json:"mirror" yaml:"mirror"`
+
 	// Hosted configures pushing packages to the proxy (/api/hosted).
 	Hosted HostedConfig `json:"hosted" yaml:"hosted"`
 
@@ -198,6 +201,9 @@ type Config struct {
 
 	// Health configures the /health endpoint behavior.
 	Health HealthConfig `json:"health" yaml:"health"`
+
+	// envWarnings collects environment values LoadFromEnv ignored.
+	envWarnings []string
 }
 
 // CooldownConfig configures version cooldown periods.
@@ -463,6 +469,7 @@ type GradleConfig struct {
 // GradleBuildCacheConfig configures Gradle HttpBuildCache safeguards.
 type GradleBuildCacheConfig struct {
 	// ReadOnly disables PUT uploads and keeps cache reads (GET/HEAD) enabled.
+	// Default: true; set false on the instance that CI uploads to.
 	ReadOnly bool `json:"read_only" yaml:"read_only"`
 
 	// MaxUploadSize caps a single PUT body size (e.g., "100MB"). Must be > 0.
@@ -1064,7 +1071,7 @@ func Default() *Config {
 		},
 		Gradle: GradleConfig{
 			BuildCache: GradleBuildCacheConfig{
-				ReadOnly:      false,
+				ReadOnly:      true,
 				MaxUploadSize: defaultGradleMaxUploadSizeStr,
 				MaxAge:        "168h",
 				MaxSize:       "",
@@ -1118,6 +1125,28 @@ func setEnvBool(dst *bool, key string) {
 	if v := os.Getenv(key); v != "" {
 		*dst = envBool(v)
 	}
+}
+
+// setGradleReadOnlyFromEnv parses strictly: an unrecognised value keeps
+// uploads off instead of opening them, and is reported via EnvWarnings.
+func (c *Config) setGradleReadOnlyFromEnv() {
+	const key = "PROXY_GRADLE_BUILD_CACHE_READ_ONLY"
+	v := os.Getenv(key)
+	if v == "" {
+		return
+	}
+	readOnly, err := strconv.ParseBool(strings.TrimSpace(v))
+	if err != nil {
+		c.Gradle.BuildCache.ReadOnly = true
+		c.envWarnings = append(c.envWarnings, fmt.Sprintf("ignoring %s=%q: not a boolean, keeping the Gradle build cache read-only", key, v))
+		return
+	}
+	c.Gradle.BuildCache.ReadOnly = readOnly
+}
+
+// EnvWarnings returns the environment values LoadFromEnv ignored.
+func (c *Config) EnvWarnings() []string {
+	return c.envWarnings
 }
 
 func setEnvStringSlice(dst *[]string, key string) {
@@ -1222,7 +1251,7 @@ func (c *Config) LoadFromEnv() {
 	setEnvString(&c.ArtifactMaxSize, "PROXY_ARTIFACT_MAX_SIZE")
 	setEnvString(&c.MetadataRewriteCacheSize, "PROXY_METADATA_REWRITE_CACHE_SIZE")
 	setEnvString(&c.HTTPTimeout, "PROXY_HTTP_TIMEOUT")
-	setEnvBool(&c.Gradle.BuildCache.ReadOnly, "PROXY_GRADLE_BUILD_CACHE_READ_ONLY")
+	c.setGradleReadOnlyFromEnv()
 	setEnvString(&c.Gradle.BuildCache.MaxUploadSize, "PROXY_GRADLE_BUILD_CACHE_MAX_UPLOAD_SIZE")
 	setEnvString(&c.Gradle.BuildCache.MaxAge, "PROXY_GRADLE_BUILD_CACHE_MAX_AGE")
 	setEnvString(&c.Gradle.BuildCache.MaxSize, "PROXY_GRADLE_BUILD_CACHE_MAX_SIZE")
@@ -1343,6 +1372,8 @@ func (c *Config) validateCacheArtifacts() error {
 		return fmt.Errorf("storage.cache_artifacts: false cannot be combined with storage.direct_serve: no artifacts are stored to redirect to")
 	case c.MirrorAPI:
 		return fmt.Errorf("storage.cache_artifacts: false cannot be combined with mirror_api: mirrored artifacts would never be served")
+	case len(c.Mirror.Schedules) > 0:
+		return fmt.Errorf("storage.cache_artifacts: false cannot be combined with mirror.schedules: mirrored artifacts would never be served")
 	case c.Hosted.Enabled:
 		return fmt.Errorf("storage.cache_artifacts: false cannot be combined with hosted.enabled: pushed packages would never be served")
 	}
@@ -1375,6 +1406,10 @@ func (c *Config) validateComponents() error {
 	}
 
 	if err := c.Hosted.Validate(); err != nil {
+		return err
+	}
+
+	if err := c.Mirror.Validate(); err != nil {
 		return err
 	}
 
