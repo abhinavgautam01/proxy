@@ -35,6 +35,8 @@ type fakeSupermarket struct {
 	available atomic.Bool
 	// token, when set, is the bearer token the API requires.
 	token string
+	// tarball is the content of every cookbook archive it serves.
+	tarball string
 
 	mu       sync.Mutex
 	requests map[string]int
@@ -43,7 +45,7 @@ type fakeSupermarket struct {
 
 func newFakeSupermarket(t *testing.T, token string) *fakeSupermarket {
 	t.Helper()
-	s := &fakeSupermarket{token: token, requests: map[string]int{}}
+	s := &fakeSupermarket{token: token, tarball: chefTestTarball, requests: map[string]int{}}
 	s.available.Store(true)
 
 	s.files = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -60,7 +62,7 @@ func newFakeSupermarket(t *testing.T, token string) *fakeSupermarket {
 			return
 		}
 		w.Header().Set("Content-Type", "application/x-gzip")
-		_, _ = w.Write([]byte(chefTestTarball))
+		_, _ = w.Write([]byte(s.tarball))
 	}))
 	t.Cleanup(s.files.Close)
 	s.filesURL = strings.Replace(s.files.URL, "127.0.0.1", "localhost", 1)
@@ -100,7 +102,7 @@ func (s *fakeSupermarket) serveAPI(w http.ResponseWriter, r *http.Request) {
 			api+"/cookbooks/apt/versions/7.6.0", api+"/cookbooks/apt/versions/7.6.0", api+"/cookbooks/apt/versions/7.5.22")
 	case "/api/v1/cookbooks/apt/versions/7.5.22":
 		_, _ = fmt.Fprintf(w, `{"license":"Apache-2.0","tarball_file_size":%d,"version":"7.5.22","cookbook":%q,"file":%q,"dependencies":{"compat_resource":">= 0.0.0"}}`,
-			len(chefTestTarball), api+"/cookbooks/apt", api+"/cookbooks/apt/versions/7.5.22/download")
+			len(s.tarball), api+"/cookbooks/apt", api+"/cookbooks/apt/versions/7.5.22/download")
 	case "/api/v1/cookbooks/apt/versions/7.5.22/download":
 		http.Redirect(w, r, s.filesURL+"/cookbook_versions/tarballs/34899/original/apt.tgz?1714639378", http.StatusFound)
 	default:
@@ -412,6 +414,46 @@ func TestChefUnreadableUniverseIsBadGateway(t *testing.T) {
 	}
 }
 
+// Switching upstream.chef to another Supermarket keeps the cache, but an
+// archive cached from the previous one is not served for a cookbook the new
+// one publishes under the same name and version.
+func TestChefArchiveCacheDependsOnUpstream(t *testing.T) {
+	const target = "/api/v1/cookbooks/apt/versions/7.5.22/download"
+	public := newFakeSupermarket(t, "")
+	private := newFakeSupermarket(t, "")
+	private.tarball = "private cookbook tarball bytes"
+
+	publicHandler, proxy := newChefTestHandler(t, public, public.api.Client())
+	if w := serveChefRequest(publicHandler, target); w.Code != http.StatusOK || w.Body.String() != public.tarball {
+		t.Fatalf("public download = %d %q", w.Code, w.Body.String())
+	}
+
+	privateHandler := NewChefHandler(proxy, chefTestProxyURL, private.api.URL)
+	w := serveChefRequest(privateHandler, target)
+	if w.Code != http.StatusOK {
+		t.Fatalf("private download status = %d: %s", w.Code, w.Body.String())
+	}
+	if w.Body.String() != private.tarball {
+		t.Errorf("private download = %q, want the private Supermarket's tarball", w.Body.String())
+	}
+	if got := private.count(target); got != 1 {
+		t.Errorf("private download requests = %d, want 1", got)
+	}
+
+	// Each upstream's archive stays cached under its own identity.
+	for _, tt := range []struct {
+		handler  *ChefHandler
+		upstream *fakeSupermarket
+	}{{publicHandler, public}, {privateHandler, private}} {
+		if again := serveChefRequest(tt.handler, target); again.Code != http.StatusOK || again.Body.String() != tt.upstream.tarball {
+			t.Errorf("cached download from %s = %d %q, want %q", tt.upstream.api.URL, again.Code, again.Body.String(), tt.upstream.tarball)
+		}
+		if got := tt.upstream.count(target); got != 1 {
+			t.Errorf("download requests to %s = %d, want 1 (second served from cache)", tt.upstream.api.URL, got)
+		}
+	}
+}
+
 func TestChefCacheKeyDependsOnUpstream(t *testing.T) {
 	a := NewChefHandler(nil, chefTestProxyURL, "https://supermarket.chef.io")
 	b := NewChefHandler(nil, chefTestProxyURL, "https://supermarket.example.com/")
@@ -420,5 +462,14 @@ func TestChefCacheKeyDependsOnUpstream(t *testing.T) {
 	}
 	if containsPathTraversal(a.cacheKey("cookbooks/apt/versions/7.5.22")) {
 		t.Error("cache key is not a valid metadata key")
+	}
+	if a.archiveFilename("apt", "7.5.22") == b.archiveFilename("apt", "7.5.22") {
+		t.Error("two Supermarkets share an archive filename")
+	}
+	if got := a.archiveFilename("apt", "7.5.22"); !strings.HasPrefix(got, "apt-7.5.22-") || !strings.HasSuffix(got, ".tgz") {
+		t.Errorf("archive filename = %q, want apt-7.5.22-<upstream>.tgz", got)
+	}
+	if NewChefHandler(nil, chefTestProxyURL, "https://supermarket.example.com").upstreamKey != b.upstreamKey {
+		t.Error("a trailing slash changes the upstream key")
 	}
 }

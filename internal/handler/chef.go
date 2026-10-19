@@ -18,8 +18,9 @@ const (
 	chefEcosystem = "chef"
 	chefMountPath = "/chef"
 	chefAPIPath   = "/api/v1"
-	// chefUpstreamKeyLength is how much of the upstream URL's digest prefixes
-	// metadata cache keys: enough to keep two upstreams apart.
+	// chefUpstreamKeyLength is how much of the upstream URL's digest scopes
+	// metadata cache keys and archive filenames: enough to keep two upstreams
+	// apart.
 	chefUpstreamKeyLength = 16
 )
 
@@ -43,15 +44,22 @@ type ChefHandler struct {
 	proxy       *Proxy
 	proxyURL    string
 	upstreamURL string
+	// upstreamKey identifies the upstream in cache keys, so pointing
+	// upstream.chef at another Supermarket does not serve the previous one's
+	// documents or archives.
+	upstreamKey string
 }
 
 // NewChefHandler creates a Chef Supermarket handler for the Supermarket at
 // upstreamURL, such as https://supermarket.chef.io or a private Supermarket.
 func NewChefHandler(proxy *Proxy, proxyURL, upstreamURL string) *ChefHandler {
+	upstreamURL = strings.TrimSuffix(upstreamURL, "/")
+	digest := sha256.Sum256([]byte(upstreamURL))
 	return &ChefHandler{
 		proxy:       proxy,
 		proxyURL:    strings.TrimSuffix(proxyURL, "/"),
-		upstreamURL: strings.TrimSuffix(upstreamURL, "/"),
+		upstreamURL: upstreamURL,
+		upstreamKey: hex.EncodeToString(digest[:])[:chefUpstreamKeyLength],
 	}
 }
 
@@ -94,7 +102,8 @@ func (h *ChefHandler) handleVersion(w http.ResponseWriter, r *http.Request) {
 // handleDownload serves a cookbook archive from the cache. An archive not
 // cached yet is fetched through the Supermarket download endpoint, following
 // the redirect it answers with. A cached archive is served without the
-// upstream.
+// upstream. Archives are cached per upstream, since two Supermarkets can
+// publish different cookbooks under the same name and version.
 func (h *ChefHandler) handleDownload(w http.ResponseWriter, r *http.Request) {
 	name, version, ok := chefVersionFromRequest(r)
 	if !ok {
@@ -102,9 +111,8 @@ func (h *ChefHandler) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filename := name + "-" + version + ".tgz"
 	result, err := h.proxy.GetOrFetchArtifactFromURL(
-		r.Context(), chefEcosystem, name, version, filename, h.upstreamVersionURL(name, version)+"/download")
+		r.Context(), chefEcosystem, name, version, h.archiveFilename(name, version), h.upstreamVersionURL(name, version)+"/download")
 	if err != nil {
 		h.proxy.serveArtifactError(w, err, "failed to fetch cookbook")
 		return
@@ -289,12 +297,16 @@ func (h *ChefHandler) upstreamVersionURL(name, version string) string {
 	return h.upstreamCookbookURL(name) + "/versions/" + url.PathEscape(version)
 }
 
-// cacheKey prefixes a metadata cache key with the upstream's digest, so
-// pointing upstream.chef at another Supermarket does not serve the previous
-// one's documents.
+// cacheKey prefixes a metadata cache key with the upstream's key.
 func (h *ChefHandler) cacheKey(documentKey string) string {
-	digest := sha256.Sum256([]byte(h.upstreamURL))
-	return hex.EncodeToString(digest[:])[:chefUpstreamKeyLength] + "/" + documentKey
+	return h.upstreamKey + "/" + documentKey
+}
+
+// archiveFilename names a cookbook archive in the cache. The filename is part
+// of the artifact's cache identity, so it carries the upstream's key; the
+// .tgz extension is kept for browsing the archive.
+func (h *ChefHandler) archiveFilename(name, version string) string {
+	return name + "-" + version + "-" + h.upstreamKey + ".tgz"
 }
 
 func chefCookbookFromRequest(r *http.Request) (string, bool) {
