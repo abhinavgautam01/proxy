@@ -89,6 +89,7 @@ func TestMetricsAreRegistered(t *testing.T) {
 		CachedArtifacts,
 		CircuitBreakerState,
 		CircuitBreakerTrips,
+		UpstreamRateLimitHolds,
 		ActiveRequests,
 	}
 

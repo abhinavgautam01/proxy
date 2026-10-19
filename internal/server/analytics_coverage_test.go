@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/git-pkgs/proxy/internal/metrics"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // metricSurface records where each registered metric is shown on /ui/analytics.
@@ -57,7 +58,6 @@ var metricSurface = map[string]string{
 // on the analytics page. The page is meant to be a complete view of what
 // /metrics exposes, so a silently unsurfaced metric is a gap, not a detail.
 func TestEveryMetricIsSurfaced(t *testing.T) {
-	isolateRecentFailures(t)
 	// Touch every metric family so it is present in the registry output, since
 	// a vector with no observed label values gathers as nothing at all.
 	metrics.RecordRequest("npm", 200, 0)
@@ -81,13 +81,14 @@ func TestEveryMetricIsSurfaced(t *testing.T) {
 	metrics.UpdateEcosystemStats([]metrics.EcosystemStats{{Ecosystem: "npm", DownloadedBytes: 1}})
 	metrics.UpdateMetadataCacheStats([]metrics.MetadataCacheStats{{Ecosystem: "npm", Entries: 1, Size: 1}})
 
-	snap, err := metrics.Gather()
+	families, err := prometheus.DefaultGatherer.Gather()
 	if err != nil {
 		t.Fatalf("Gather: %v", err)
 	}
 
 	var registered []string
-	for _, name := range snap.Names() {
+	for _, family := range families {
+		name := family.GetName()
 		if strings.HasPrefix(name, "proxy_") {
 			registered = append(registered, name)
 		}

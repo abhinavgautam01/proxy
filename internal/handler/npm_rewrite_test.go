@@ -249,7 +249,7 @@ func TestNPMStoredRewriteSkippedWhenStale(t *testing.T) {
 	body := []byte(`{}`)
 	proxy.cacheMetadataBlob(t.Context(), "npm", "demo", metadataStoragePath("npm", "demo"), &upstreamMetadata{body: body})
 	key := rewriteCacheKey("npm", "http://proxy", "demo", body)
-	if _, _, err := proxy.rewrites.rewrite(t.Context(), key, body, func(b []byte) ([]byte, error) { return b, nil }); err != nil {
+	if _, err := proxy.rewrites.rewrite(t.Context(), key, body, func(b []byte) ([]byte, error) { return b, nil }); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := proxy.storedRewrite("npm", "demo", "http://proxy", "demo"); !ok {
@@ -284,7 +284,7 @@ func TestNPMStoredRewriteRecordsMetadataHit(t *testing.T) {
 	body := []byte(`{"name":"demo"}`)
 	proxy.cacheMetadataBlob(t.Context(), "npm", "hit-demo", metadataStoragePath("npm", "hit-demo"), &upstreamMetadata{body: body})
 	key := rewriteCacheKey("npm", "http://proxy", "hit-demo", body)
-	if _, _, err := proxy.rewrites.rewrite(t.Context(), key, body, func(b []byte) ([]byte, error) { return b, nil }); err != nil {
+	if _, err := proxy.rewrites.rewrite(t.Context(), key, body, func(b []byte) ([]byte, error) { return b, nil }); err != nil {
 		t.Fatal(err)
 	}
 

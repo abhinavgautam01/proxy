@@ -56,11 +56,6 @@ func init() {
 	retention.Default.Register(retention.Spec{Key: "pypi", CanonicalPackage: retention.DefaultCanonical("pypi")})
 }
 
-// NewPyPIHandler creates a new PyPI protocol handler.
-func NewPyPIHandler(proxy *Proxy, proxyURL string) *PyPIHandler {
-	return NewPyPIHandlerWithUpstreams(proxy, proxyURL, "", "")
-}
-
 // NewPyPIHandlerWithUpstreams creates a PyPI handler with custom API and
 // package download upstreams.
 func NewPyPIHandlerWithUpstreams(proxy *Proxy, proxyURL, upstreamURL, downloadURL string) *PyPIHandler {
@@ -116,6 +111,9 @@ func (h *PyPIHandler) handleSimplePackage(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		if errors.Is(err, ErrUpstreamNotFound) {
 			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if writeUpstreamHeld(w, err) {
 			return
 		}
 		h.proxy.Logger.Error("upstream request failed", "error", err)
@@ -416,6 +414,9 @@ func (h *PyPIHandler) proxyAndRewriteJSON(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		if errors.Is(err, ErrUpstreamNotFound) {
 			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if writeUpstreamHeld(w, err) {
 			return
 		}
 		h.proxy.Logger.Error("upstream request failed", "error", err)
@@ -821,6 +822,9 @@ func (h *PyPIHandler) proxySimple(w http.ResponseWriter, r *http.Request, path s
 
 	resp, err := h.proxy.HTTPClient.Do(req)
 	if err != nil {
+		if writeUpstreamHeld(w, err) {
+			return
+		}
 		h.proxy.Logger.Error("upstream request failed", "error", err)
 		http.Error(w, "upstream request failed", http.StatusBadGateway)
 		return

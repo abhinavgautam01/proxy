@@ -164,6 +164,9 @@ func (h *NPMHandler) handleSecurity(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.proxy.HTTPClient.Do(req)
 	if err != nil {
+		if writeUpstreamHeld(w, err) {
+			return
+		}
 		h.proxy.Logger.Error("npm audit request failed", "path", r.URL.Path, "error", err)
 		JSONError(w, http.StatusBadGateway, "failed to reach upstream registry")
 		return
@@ -204,17 +207,7 @@ func (h *NPMHandler) handlePackageMetadata(w http.ResponseWriter, r *http.Reques
 	upstreamURL := registryURL + "/" + registryPath
 	metadataCacheKey := npmMetadataCacheKey(cacheKey, packagePath, packageName)
 
-	// Prefer the smaller abbreviated packument format but include application/json
-	// as a fallback so upstreams that reject the abbreviated type (e.g. JFrog
-	// Artifactory, which returns 406) can still respond with full metadata.
-	// When cooldown is enabled we must use full metadata exclusively because the
-	// abbreviated format omits the "time" map required for version age filtering.
-	// Operators can also force full metadata so clients that gate on publish
-	// age (for example Yarn's npmMinimalAgeGate) keep working through the proxy.
-	accept := npmAcceptDefault
-	if h.proxy.NPMFullMetadata || (h.proxy.Cooldown != nil && h.proxy.Cooldown.Enabled()) {
-		accept = contentTypeJSON
-	}
+	accept := h.packumentAccept()
 
 	specifier, versionLookup := npmVersionSpecifier(packagePath, packageName)
 	if h.serveLocalMetadata(w, r, npmMetadataRequest{packageName, specifier, versionLookup, upstreamURL, accept, metadataCacheKey}) {
@@ -239,6 +232,9 @@ func (h *NPMHandler) handlePackageMetadata(w http.ResponseWriter, r *http.Reques
 			} else {
 				JSONError(w, http.StatusNotFound, ErrPackageNotFound.Error())
 			}
+			return
+		}
+		if writeUpstreamHeld(w, err) {
 			return
 		}
 		h.proxy.Logger.Error("failed to fetch npm metadata", "error", err)
@@ -276,6 +272,26 @@ func (h *NPMHandler) handlePackageMetadata(w http.ResponseWriter, r *http.Reques
 	serveRewrittenMetadata(w, r, rewritten)
 }
 
+// packumentAccept returns the Accept header packuments are requested with.
+// It prefers the smaller abbreviated packument format but includes
+// application/json as a fallback so upstreams that reject the abbreviated type
+// (e.g. JFrog Artifactory, which returns 406) can still respond with full
+// metadata. When cooldown is enabled we must use full metadata exclusively
+// because the abbreviated format omits the "time" map required for version age
+// filtering. Operators can also force full metadata so clients that gate on
+// publish age (for example Yarn's npmMinimalAgeGate) keep working through the
+// proxy.
+//
+// Every request for a packument uses it, since they share one cache row: a
+// request with another Accept would replace the document the others are
+// served with one in the other format.
+func (h *NPMHandler) packumentAccept() string {
+	if h.proxy.NPMFullMetadata || h.proxy.cooldownEnabled() {
+		return contentTypeJSON
+	}
+	return npmAcceptDefault
+}
+
 // handleFilteredNPMVersionMetadata serves /pkg/<version> and /pkg/<tag> from the
 // filtered packument so cooldown and dist-tags match the root metadata response.
 func (h *NPMHandler) handleFilteredNPMVersionMetadata(w http.ResponseWriter, r *http.Request, packageName, specifier, accept, registryURL, cacheKey, metadataCacheKey string) {
@@ -284,6 +300,9 @@ func (h *NPMHandler) handleFilteredNPMVersionMetadata(w http.ResponseWriter, r *
 	if err != nil {
 		if errors.Is(err, ErrUpstreamNotFound) {
 			JSONError(w, http.StatusNotFound, ErrPackageNotFound.Error())
+			return
+		}
+		if writeUpstreamHeld(w, err) {
 			return
 		}
 		h.proxy.Logger.Error("failed to fetch npm metadata", "error", err)
@@ -643,14 +662,8 @@ func (h *NPMHandler) writeNPMVersion(out *bytes.Buffer, packageName, version str
 		"old", oldTarball, "new", newTarball)
 }
 
-// writeFilteredJSONObject writes the object obj holds, keeping the members
-// whose decoded key keep accepts.
-func writeFilteredJSONObject(out *bytes.Buffer, obj []byte, keep func(string) bool) error {
-	return writeFilteredJSONObjectWith(out, obj, keep, nil)
-}
-
-// writeFilteredJSONObjectWith is writeFilteredJSONObject followed by extra
-// string members.
+// writeFilteredJSONObjectWith keeps members whose decoded keys match keep,
+// then appends extra string members.
 func writeFilteredJSONObjectWith(out *bytes.Buffer, obj []byte, keep func(string) bool, extra [][2]string) error {
 	out.WriteByte('{')
 	first := true
@@ -832,7 +845,7 @@ func (h *NPMHandler) handleDownload(w http.ResponseWriter, r *http.Request) {
 	registryURL, cacheKey := h.sourceFor(packageName)
 	metadata := sync.OnceValues(func() ([]byte, error) {
 		upstreamURL := registryURL + "/" + url.PathEscape(packageName)
-		body, _, err := h.proxy.FetchOrCacheMetadata(r.Context(), "npm", cacheKey, upstreamURL, contentTypeJSON)
+		body, _, err := h.proxy.FetchOrCacheMetadata(r.Context(), "npm", cacheKey, upstreamURL, h.packumentAccept())
 		return body, err
 	})
 	if h.versionInCooldown(packageName, version, metadata) {
@@ -850,6 +863,9 @@ func (h *NPMHandler) handleDownload(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrArtifactBlocked), errors.Is(err, ErrVersionDenied):
 			JSONError(w, http.StatusForbidden, err.Error())
 		default:
+			if writeUpstreamHeld(w, err) {
+				return
+			}
 			h.proxy.Logger.Error("failed to get artifact", "error", err)
 			JSONError(w, http.StatusBadGateway, "failed to fetch package")
 		}

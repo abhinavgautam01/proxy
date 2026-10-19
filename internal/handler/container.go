@@ -121,14 +121,6 @@ type containerRegistry struct {
 	registryURL      string
 }
 
-// NewContainerHandler creates a new container registry protocol handler.
-// Named registries are selected with the repository prefix
-// upstream/{name}/, leaving unprefixed requests compatible with the Docker Hub
-// mirror behavior.
-func NewContainerHandler(proxy *Proxy, proxyURL string, namedRegistries ...map[string]string) *ContainerHandler {
-	return newContainerHandler(proxy, proxyURL, dockerHubRegistry, namedRegistries...)
-}
-
 // NewContainerHandlerWithRegistry creates a container handler with a custom
 // default registry and optional named registries.
 func NewContainerHandlerWithRegistry(
@@ -450,6 +442,9 @@ func (h *ContainerHandler) handleBlobDownload(w http.ResponseWriter, r *http.Req
 			h.containerError(w, http.StatusBadGateway, "DIGEST_INVALID", "blob digest verification failed")
 			return
 		}
+		if writeUpstreamHeld(w, err) {
+			return
+		}
 		h.proxy.Logger.Error("failed to fetch blob", "error", err)
 		h.containerError(w, http.StatusBadGateway, "INTERNAL_ERROR", "failed to fetch blob")
 		return
@@ -520,6 +515,9 @@ func (h *ContainerHandler) proxyBlobHead(w http.ResponseWriter, r *http.Request,
 
 	resp, err := h.proxy.HTTPClient.Do(req)
 	if err != nil {
+		if writeUpstreamHeld(w, err) {
+			return
+		}
 		h.containerError(w, http.StatusBadGateway, "INTERNAL_ERROR", "failed to fetch from upstream")
 		return
 	}
