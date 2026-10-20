@@ -20,12 +20,12 @@ import (
 	"github.com/git-pkgs/cooldown"
 	"github.com/git-pkgs/proxy/internal/database"
 	"github.com/git-pkgs/proxy/internal/denylist"
-	"github.com/git-pkgs/proxy/internal/httpclient"
 	"github.com/git-pkgs/proxy/internal/metrics"
 	"github.com/git-pkgs/proxy/internal/packageurl"
 	"github.com/git-pkgs/proxy/internal/scanner"
 	"github.com/git-pkgs/proxy/internal/storage"
 	"github.com/git-pkgs/purl"
+	registryclient "github.com/git-pkgs/registries/client"
 	"github.com/git-pkgs/registries/fetch"
 	"github.com/opencontainers/go-digest"
 )
@@ -178,7 +178,7 @@ type Proxy struct {
 
 	// RateLimits is the gate under the upstream clients. Artifact fetches
 	// check it before calling Fetcher, so held hosts never reach its breaker.
-	RateLimits *httpclient.RateLimitGate
+	RateLimits *registryclient.RateLimitGate
 
 	// HostedNPMScopes and HostedComposerVendors name namespaces served from
 	// pushed packages alone, without asking the upstream.
@@ -1516,11 +1516,20 @@ func (p *Proxy) readCachedMetadata(ctx context.Context, entry *database.Metadata
 	if err != nil {
 		return nil, "", err
 	}
+	p.recordMetadataRead(entry)
 	ct := contentTypeJSON
 	if entry.ContentType.Valid {
 		ct = entry.ContentType.String
 	}
 	return data, ct, nil
+}
+
+// recordMetadataRead marks a cached metadata document as used, so size
+// eviction drops the documents nobody asks for first.
+func (p *Proxy) recordMetadataRead(entry *database.MetadataCacheEntry) {
+	if err := p.DB.RecordMetadataHit(entry.Ecosystem, entry.Name); err != nil {
+		p.Logger.Warn("failed to record metadata cache hit", "ecosystem", entry.Ecosystem, "key", entry.Name, "error", err)
+	}
 }
 
 func (p *Proxy) recordMetadataCacheMiss(ecosystem string) {
@@ -1640,6 +1649,7 @@ func (p *Proxy) refreshMetadataBlob(ecosystem, cacheKey string, meta *upstreamMe
 	if !refreshed {
 		return ""
 	}
+	p.recordMetadataRead(entry)
 	return entry.ContentDigest.String
 }
 
